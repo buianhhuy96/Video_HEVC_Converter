@@ -1,18 +1,17 @@
-# Video HEVC Converter — Ugreen DXP4800 Plus
+# Video HEVC Converter
 
 Docker service that watches your movie/video libraries, transcodes anything that
-isn't already HEVC/AV1/VP9 to **HEVC (x265)** using the **Intel 8505 iGPU
-(Quick Sync Video)**, validates the result, then atomically replaces the
-original with the same filename.
+isn't already HEVC/AV1/VP9 to **HEVC (x265)**, validates the result, then
+atomically replaces the original with the same filename. Intel Quick Sync Video
+(QSV) acceleration is used when available; otherwise it falls back to software
+encoding with `libx265`.
 
-## Why HEVC + Intel QSV on this NAS?
+## Hardware acceleration
 
-- Intel 8505 (Alder Lake-N, Iris Xe iGPU) has **hardware HEVC encode + decode**
-  (10-bit HDR-capable). Using it keeps CPU near-idle so the NAS stays responsive.
-- HEVC yields ~40–60% smaller files than H.264 at equivalent visual quality —
-  faster streaming over slow networks with less pre-buffering.
-- Hardware transcoding also means Jellyfin/Plex/Emby can serve these files with
-  live re-encoding at wire speed on the same iGPU.
+An Intel GPU with QSV support is optional. When `/dev/dri/renderD128` is
+available in the container, the converter first attempts hardware encoding. If
+the device is unavailable or hardware encoding fails, it uses CPU-based
+`libx265` encoding instead.
 
 ## What gets converted vs skipped
 
@@ -54,11 +53,12 @@ is deleted, the original is untouched, and the failure is recorded in
 ## Setup
 
 1. Edit [docker-compose.yml](docker-compose.yml):
-   - Replace the `/volume1/...` bind mounts with your actual Ugreen share paths.
-   - On the NAS, find the correct GIDs and update `group_add`:
+  - Replace the `/volume1/...` bind mounts with your actual media paths.
+  - For Intel QSV acceleration, find the correct GIDs and update `group_add`:
      ```bash
      getent group render video
      ```
+  - For CPU-only encoding, remove the `devices` and `group_add` sections.
 2. Edit [config/config.yaml](config/config.yaml) — at minimum, update
    `scan_paths` if you added or renamed mounts.
 3. Build and run:
@@ -80,7 +80,7 @@ In `config/config.yaml`:
   - `23` (default) → excellent, ~50% smaller
   - `26` → mobile-friendly, ~65% smaller
 - `encoder.preset`: `veryfast | fast | medium | slow | slower | veryslow`.
-  `slower` gives the best compression the 8505 can sustain in real time.
+  Slower presets generally improve compression but take longer.
 
 ## Dry run
 
@@ -100,7 +100,7 @@ docker compose exec video-converter sqlite3 /state/converter.db \
   "SELECT status, COUNT(*), SUM(orig_size)/1024/1024 AS orig_mib, SUM(new_size)/1024/1024 AS new_mib FROM processed GROUP BY status;"
 ```
 
-## Verifying hardware acceleration works
+## Verifying optional hardware acceleration
 
 Once the container is running:
 ```bash
