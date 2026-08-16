@@ -1,0 +1,32 @@
+services:
+  video-converter:
+    build: .
+    container_name: video-converter
+    restart: unless-stopped
+    # Intel QSV / VAAPI hardware acceleration (Intel 8505 iGPU)
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      # Adjust these to match `getent group render video` on the NAS host
+      - "993"   # render
+      - "44"    # video
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      PUID: "1000"
+      PGID: "1000"
+      CONFIG_PATH: /config/config.yaml
+      # Web UI settings. Leave UI_PASSWORD unset for open access on your LAN,
+      # or set it to require HTTP Basic auth on every request.
+      UI_PORT: "8080"
+      # UI_PASSWORD: "change-me"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config
+      - ./logs:/logs
+      - ./state:/state
+      # ==== Mount your NAS movie/video shares here (read-write) ====
+      - /volume1/Movies:/media/Movies
+      - /volume1/TVShows:/media/TVShows
+      # Optional scratch space on fast storage for in-progress files
+      - ./tmp:/tmp/convert

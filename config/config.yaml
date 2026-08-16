@@ -1,0 +1,166 @@
+# =============================================================================
+# Video Conversion config — Ugreen DXP4800 Plus (Intel 8505 / Alder Lake-N)
+# =============================================================================
+
+# Directories inside the container to scan (map real paths in docker-compose.yml)
+scan_paths:
+  - /media/Movies
+  - /media/TVShows
+
+# File extensions considered "video". Anything else is ignored outright.
+video_extensions:
+  - .mp4
+  - .mkv
+  - .mov
+  - .avi
+  - .wmv
+  - .flv
+  - .m4v
+  - .ts
+  - .mts
+  - .m2ts
+  - .webm
+  - .mpg
+  - .mpeg
+  - .vob
+  - .3gp
+
+# Codecs that are already efficient — skip entirely.
+skip_codecs:
+  - hevc          # H.265 / x265
+  - h265
+  - av1           # even more efficient than HEVC; leave alone
+  - vp9
+
+# Raw / log / intermediate / lossless formats — NEVER re-encode these.
+# ffprobe codec_name values.
+raw_codecs:
+  - prores
+  - prores_ks
+  - dnxhd
+  - dnxhr
+  - cfhd          # GoPro CineForm
+  - v210
+  - v410
+  - r210
+  - r10k
+  - huffyuv
+  - ffv1
+  - utvideo
+  - rawvideo
+  - mjpeg         # often used as intermediate
+  - magicyuv
+  - lagarith
+
+# Extensions that indicate camera raw containers — skip regardless of codec.
+raw_extensions:
+  - .braw         # Blackmagic RAW
+  - .r3d          # RED
+  - .ari          # ARRI
+  - .arriraw
+  - .dng          # CinemaDNG
+  - .crm          # Canon RAW
+  - .mxf          # broadcast, often ProRes/DNxHD carrier — skip to be safe
+
+# Filename markers that suggest raw/log source — skip on match (case-insensitive).
+raw_filename_markers:
+  - "_log"
+  - ".log."
+  - "slog"
+  - "vlog"
+  - "flog"
+  - "hlg-raw"
+  - "prores"
+  - "dnxhr"
+  - "master"
+  - "intermediate"
+
+# Minimum file size to bother converting (bytes). Skip tiny clips.
+min_size_bytes: 20971520   # 20 MiB
+
+# ---------------------------------------------------------------------------
+# Encoder settings — Intel QSV hardware encode on the 8505 iGPU
+# ---------------------------------------------------------------------------
+encoder:
+  # "hevc_qsv" = Intel hardware HEVC encoder. Falls back to libx265 if unavailable.
+  codec: hevc_qsv
+  fallback_codec: libx265
+
+  # ICQ (Intelligent Constant Quality) — quality-based, closest to CRF.
+  # Lower = higher quality / larger file. Sensible range: 20 (high) – 26 (small).
+  # 23 is a good balance for 1080p movie library, giving ~40-60% smaller than H.264.
+  global_quality: 23
+
+  # Slower preset = better compression at the same quality. The 8505 handles
+  # "slower" comfortably in real time for 1080p, ~1.5x realtime for 4K.
+  preset: slower
+
+  # Lookahead improves quality on scene changes. Depth in frames.
+  look_ahead: true
+  look_ahead_depth: 40
+
+  # Preserve 10-bit content (HDR, high-quality sources). Auto-detected per file.
+  allow_10bit: true
+
+  # libx265 CRF used only when hevc_qsv is unavailable.
+  fallback_crf: 22
+
+  # Cap output bitrate as a sanity ceiling (0 = disabled).
+  max_bitrate_kbps: 0
+
+# ---------------------------------------------------------------------------
+# Output container rules
+# ---------------------------------------------------------------------------
+output:
+  # Keep original extension when the container supports HEVC (mp4/mkv/mov/ts).
+  # For legacy containers (avi/wmv/flv/vob/mpg) remux into this container:
+  fallback_container: .mkv
+
+  # Discard the new file only if it grew beyond `original * this ratio`.
+  # 1.0 = keep anything that isn't bigger than the source (default).
+  # Lower (e.g. 0.95) requires the new file to be measurably smaller.
+  max_size_ratio: 1.0
+
+  # Copy all audio, subtitle, and attachment streams unchanged.
+  copy_audio: true
+  copy_subs: true
+
+# ---------------------------------------------------------------------------
+# Validation — how thoroughly to verify the transcoded file before replacing
+# ---------------------------------------------------------------------------
+validation:
+  # Duration must be within this many seconds of the source.
+  duration_tolerance_seconds: 1.5
+  # Full decode pass (ffmpeg -f null) — slower but catches every corrupt frame.
+  full_decode: true
+  # Require at least one video stream & matching audio stream count.
+  check_stream_counts: true
+
+# ---------------------------------------------------------------------------
+# Runtime behaviour
+# ---------------------------------------------------------------------------
+runtime:
+  # Delete the original file after successful validation + replace.
+  # If false, keeps original as "<name>.orig<ext>" for you to review.
+  delete_original: true
+  # Where to stage the in-progress file. Fast local scratch is ideal.
+  work_dir: /tmp/convert
+  # Log file inside the /logs mount.
+  log_file: /logs/converter.log
+  # SQLite state DB — tracks processed files so we don't rescan them.
+  state_db: /state/converter.db
+  # Dry run: analyse & report only, no encoding.
+  dry_run: false
+  # Kill ffmpeg if it produces no progress line for this long (seconds).
+  # 0 disables the watchdog. 300 = 5 min is generous for very slow storage.
+  stall_timeout_seconds: 300
+  # Wait this long and re-stat a file to make sure it isn't currently
+  # being written (in-progress download, capture, etc.). Set 0 to disable.
+  stability_check_seconds: 2.0
+  # Hours between full library sweeps. Fractional supported (0.5 = 30 min).
+  # 0 = run one scan then exit (useful for cron-style scheduling).
+  scan_interval_hours: 1.0
+  # If true, encoding starts automatically after every scan finishes.
+  # If false, the scanner just populates the "Pending" list; encoding waits
+  # until you click the Convert button in the web UI.
+  auto_convert: true
