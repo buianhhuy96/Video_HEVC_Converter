@@ -290,6 +290,7 @@ def _render_page(cfg: Config) -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Video HEVC Converter</title>
+  <link rel='icon' type='image/svg+xml' href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect width='128' height='128' rx='20' fill='%230f172a'/><rect x='16' y='28' width='96' height='72' rx='8' fill='%231e293b' stroke='%23334155' stroke-width='2'/><circle cx='26' cy='42' r='3' fill='%2322d3ee'/><circle cx='26' cy='64' r='3' fill='%2322d3ee'/><circle cx='26' cy='86' r='3' fill='%2322d3ee'/><circle cx='102' cy='42' r='3' fill='%2322d3ee'/><circle cx='102' cy='64' r='3' fill='%2322d3ee'/><circle cx='102' cy='86' r='3' fill='%2322d3ee'/><path d='M52 42 L84 64 L52 86 Z' fill='%2322d3ee'/></svg>">
   <script src='https://unpkg.com/htmx.org@1.9.12'></script>
   <script src='https://cdn.tailwindcss.com'></script>
   <style>

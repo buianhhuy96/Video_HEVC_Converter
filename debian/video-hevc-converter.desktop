@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Video HEVC Converter
+GenericName=HEVC Conversion Service
+Comment=Open the Video HEVC Converter web interface
+Exec=xdg-open http://localhost:8080
+Icon=video-hevc-converter
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=video;hevc;h265;convert;transcode;ffmpeg;
+StartupNotify=false

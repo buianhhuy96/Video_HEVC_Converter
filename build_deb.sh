@@ -38,6 +38,8 @@ install -d "$BUILD_ROOT/DEBIAN"
 install -d "$BUILD_ROOT/usr/lib/$PKG"
 install -d "$BUILD_ROOT/usr/share/$PKG"
 install -d "$BUILD_ROOT/usr/share/doc/$PKG"
+install -d "$BUILD_ROOT/usr/share/applications"
+install -d "$BUILD_ROOT/usr/share/icons/hicolor/scalable/apps"
 install -d "$BUILD_ROOT/lib/systemd/system"
 
 log "Copying Python source"
@@ -49,6 +51,10 @@ install -m 0644 debian/requirements.txt  "$BUILD_ROOT/usr/share/$PKG/requirement
 
 log "Copying systemd unit"
 install -m 0644 debian/${PKG}.service    "$BUILD_ROOT/lib/systemd/system/${PKG}.service"
+
+log "Copying desktop entry + icon"
+install -m 0644 debian/${PKG}.desktop    "$BUILD_ROOT/usr/share/applications/${PKG}.desktop"
+install -m 0644 debian/${PKG}.svg        "$BUILD_ROOT/usr/share/icons/hicolor/scalable/apps/${PKG}.svg"
 
 log "Copying docs"
 install -m 0644 README.md                "$BUILD_ROOT/usr/share/doc/$PKG/README.md"
