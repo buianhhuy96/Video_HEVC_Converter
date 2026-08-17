@@ -97,6 +97,26 @@ import state          # noqa: E402
 import webui          # noqa: E402
 from store import Store  # noqa: E402
 
+# Point webui at a fake compose file so the Container mounts UI renders as it
+# would on the real NAS (where /compose/docker-compose.yml is a bind mount).
+MOCK_COMPOSE = WORKSPACE / "docker-compose.yml"
+MOCK_COMPOSE.write_text(
+    "services:\n"
+    "  video-converter:\n"
+    "    build: .\n"
+    "    volumes:\n"
+    "      - ./config:/config\n"
+    "      - ./logs:/logs\n"
+    "      - ./state:/state\n"
+    "      - /var/run/docker.sock:/var/run/docker.sock\n"
+    "      - ./docker-compose.yml:/compose/docker-compose.yml:rw\n"
+    "      - /volume2/Movies:/media/Movies\n"
+    "      - /volume2/TVShows:/media/TVShows\n"
+    "      - ./tmp:/tmp/convert\n",
+    encoding="utf-8",
+)
+webui._COMPOSE_PATH = str(MOCK_COMPOSE)
+
 
 # ---------------------------------------------------------------------------
 # Seed the state DB with sample rows.

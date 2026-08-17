@@ -11,8 +11,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-yaml \
         tini \
         ca-certificates \
+        curl \
         intel-gpu-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI + compose plugin — needed so the "Save & Restart" button can
+# rewrite docker-compose.yml and recreate this container via the socket.
+ARG DOCKER_VERSION=24.0.9
+ARG COMPOSE_VERSION=v2.29.7
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
+        -o /tmp/docker.tgz \
+    && tar xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
+    && rm /tmp/docker.tgz \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 # FastAPI + uvicorn for the web UI; ruamel.yaml preserves comments when the
 # UI writes config.yaml back. Pinned to avoid surprise upgrades.

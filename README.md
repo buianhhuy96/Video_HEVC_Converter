@@ -57,8 +57,10 @@ is deleted, the original is untouched, and the failure is recorded in
 ## Setup
 
 1. Edit [docker-compose.yml](docker-compose.yml):
-  - Replace the `/volume1/...` bind mounts with your actual media paths.
-  - For Intel QSV acceleration, find the correct GIDs and update `group_add`:
+   - Replace `/volume2` in the bind mount with the volume that holds your
+     media (or add more mount lines for extra volumes). After first start,
+     you can also edit media mounts from the web UI's **Container** card.
+   - For Intel QSV acceleration, find the correct GIDs and update `group_add`:
      ```bash
      getent group render video
      ```
@@ -70,6 +72,27 @@ is deleted, the original is untouched, and the failure is recorded in
    docker compose up -d --build
    docker compose logs -f
    ```
+
+### Editing container settings from the UI
+
+The web UI's **Container** card (Setup tab) shows the current timezone, port,
+auth, PUID/PGID, and iGPU status. Media bind mounts are editable in-place;
+clicking **Save & Restart app** rewrites [docker-compose.yml](docker-compose.yml)
+and recreates the container with the new mounts.
+
+This flow relies on two mounts already declared in the shipping
+`docker-compose.yml`:
+
+- `/var/run/docker.sock:/var/run/docker.sock` — gives the container access
+  to the Docker daemon on the host. This is the standard mechanism used by
+  Portainer / Yacht / etc. Anyone who can reach the web UI can, in principle,
+  control Docker on your NAS through it — keep the UI on a LAN interface
+  (or protected with `UI_PASSWORD`) if that matters to you.
+- `./docker-compose.yml:/compose/docker-compose.yml:rw` — gives the
+  container write access to its own compose file.
+
+Remove either mount to disable the feature; the Container card will fall back
+to read-only display and print instructions to edit the file on the host.
 
 Set `runtime.sweep_at_time: "03:00"` in [config/config.yaml](config/config.yaml)
 to run one full sweep (scan + convert) every day at that local time (container

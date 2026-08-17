@@ -25,8 +25,17 @@ services:
       - ./config:/config
       - ./logs:/logs
       - ./state:/state
-      # ==== Mount your NAS movie/video shares here (read-write) ====
-      - /volume1/Movies:/media/Movies
-      - /volume1/TVShows:/media/TVShows
+      # Required for the UI's "Save & Restart" button to rewrite this file
+      # and recreate the container. If you don't want the container to have
+      # Docker daemon access, remove these two lines — the UI will fall back
+      # to read-only mount display.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/compose/docker-compose.yml:rw
+      # ==== NAS storage mounted as /media inside the container. ====
+      # Editable in the UI (Setup tab → Container). Add/remove rows there,
+      # then click "Save & Restart app" to rewrite this file and recreate
+      # the container.
+      - /volume2/Movies:/media/Movies
+      - /volume2/TVShows:/media/TVShows
       # Optional scratch space on fast storage for in-progress files
       - ./tmp:/tmp/convert

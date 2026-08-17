@@ -10,7 +10,11 @@ import logging
 import math
 import os
 import secrets
+import shutil
+import signal
 import sqlite3
+import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +35,18 @@ _security = HTTPBasic(auto_error=False)
 _config_path: str = "/config/config.yaml"
 
 PRESETS = ["veryfast", "fast", "medium", "slow", "slower", "veryslow"]
+
+_COMPOSE_PATH = "/compose/docker-compose.yml"
+_COMPOSE_SERVICE = "video-converter"
+
+try:
+    from ruamel.yaml import YAML  # roundtrip preserves comments
+    _COMPOSE_YAML = YAML()
+    _COMPOSE_YAML.preserve_quotes = True
+    _COMPOSE_YAML.indent(mapping=2, sequence=4, offset=2)
+    _COMPOSE_YAML.width = 4096  # don't wrap long lines
+except ImportError:
+    _COMPOSE_YAML = None
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +189,83 @@ def _fmt_elapsed(secs: float) -> str:
     return f"{secs // 3600}h {(secs % 3600) // 60}m"
 
 
+def _container_info() -> dict:
+    """Runtime introspection of settings that come from docker-compose.yml."""
+    info = {
+        "timezone": os.environ.get("TZ") or "system default",
+        "ui_port": os.environ.get("UI_PORT", "8080"),
+        "ui_auth": "password required" if os.environ.get("UI_PASSWORD") else "open (no password)",
+        "puid": os.environ.get("PUID", "unset"),
+        "pgid": os.environ.get("PGID", "unset"),
+        "qsv": ("present" if Path("/dev/dri/renderD128").exists() else "not detected"),
+        "media_mounts": [],
+    }
+    media_root = Path("/media")
+    if media_root.is_dir():
+        try:
+            info["media_mounts"] = sorted(
+                str(p) for p in media_root.iterdir() if p.is_dir()
+            )
+        except OSError:
+            pass
+    return info
+
+
+def _can_edit_compose() -> bool:
+    return (
+        _COMPOSE_YAML is not None
+        and Path(_COMPOSE_PATH).is_file()
+        and os.access(_COMPOSE_PATH, os.W_OK)
+    )
+
+
+def _can_docker_compose() -> bool:
+    return (
+        _can_edit_compose()
+        and Path("/var/run/docker.sock").exists()
+        and shutil.which("docker") is not None
+    )
+
+
+def _load_compose():
+    if _COMPOSE_YAML is None or not Path(_COMPOSE_PATH).is_file():
+        return None
+    with open(_COMPOSE_PATH, encoding="utf-8") as f:
+        return _COMPOSE_YAML.load(f) or {}
+
+
+def _save_compose(doc) -> None:
+    tmp = _COMPOSE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        _COMPOSE_YAML.dump(doc, f)
+    os.replace(tmp, _COMPOSE_PATH)
+
+
+def _parse_volume(entry: str) -> tuple[str, str, str]:
+    """Split a compose volume entry into (host, container, mode)."""
+    parts = str(entry).split(":")
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return parts[0], parts[1], ""
+    return entry, "", ""
+
+
+def _media_mounts_from_compose() -> list[dict]:
+    """Return list of {host, container} for volumes whose container path is /media."""
+    doc = _load_compose()
+    if not doc:
+        return []
+    svc = doc.get("services", {}).get(_COMPOSE_SERVICE, {}) or {}
+    volumes = svc.get("volumes", []) or []
+    result = []
+    for v in volumes:
+        host, container, _ = _parse_volume(v)
+        if container == "/media" or container.startswith("/media/"):
+            result.append({"host": host, "container": container})
+    return result
+
+
 def _fmt_hms(secs: float | None) -> str:
     if not secs:
         return "—"
@@ -185,21 +278,11 @@ def _fmt_hms(secs: float | None) -> str:
 # HTML rendering — tabs
 # ---------------------------------------------------------------------------
 def _render_page(cfg: Config) -> str:
-    folders_rows = "".join(
-        f"<li class='flex items-center justify-between py-1 border-b border-slate-700'>"
-        f"<code class='text-cyan-300 text-sm'>{_esc(p)}</code>"
-        f"<form method='post' action='/api/folders/remove' class='inline'>"
-        f"<input type='hidden' name='path' value='{_esc(p)}'>"
-        f"<button class='text-red-400 hover:text-red-300 text-xs'>remove</button>"
-        f"</form></li>"
-        for p in cfg.scan_paths
-    ) or "<li class='text-slate-400 text-sm py-2'>No folders configured yet.</li>"
-
     e, o, r = cfg.encoder, cfg.output, cfg.runtime
-    preset_opts = "".join(
-        f"<option value='{p}'{' selected' if p == e.preset else ''}>{p}</option>"
-        for p in PRESETS
-    )
+    preset_idx = PRESETS.index(e.preset) if e.preset in PRESETS else PRESETS.index("veryslow")
+    # Quality slider works in percent (higher = better) but submits CRF.
+    # CRF range is 18 (pristine) to 30 (small); 100% = 18, 0% = 30.
+    quality_pct = round((30 - e.global_quality) * 100 / 12)
 
     return f"""<!DOCTYPE html>
 <html lang='en'>
@@ -244,13 +327,29 @@ def _render_page(cfg: Config) -> str:
       height:100%; background:linear-gradient(90deg, #10b981, #22d3ee);
       transition: width .6s ease-out;
     }}
+    /* Sliders */
+    .vhc-slider {{
+      -webkit-appearance: none; appearance: none;
+      height: 4px; background: #475569; border-radius: 2px;
+      outline: none; width: 100%; cursor: pointer;
+    }}
+    .vhc-slider::-webkit-slider-thumb {{
+      -webkit-appearance: none;
+      width: 12px; height: 12px; border-radius: 3px;
+      background: #e2e8f0; border: 1px solid #94a3b8; cursor: pointer;
+    }}
+    .vhc-slider::-moz-range-thumb {{
+      width: 12px; height: 12px; border-radius: 3px;
+      background: #e2e8f0; border: 1px solid #94a3b8; cursor: pointer;
+    }}
+    .vhc-slider:focus::-webkit-slider-thumb {{ background: #ffffff; }}
+    .vhc-slider:focus::-moz-range-thumb {{ background: #ffffff; }}
   </style>
 </head>
 <body class='p-6'>
   <div class='max-w-6xl mx-auto'>
     <header class='mb-4'>
       <h1 class='text-2xl font-bold'>Video HEVC Converter</h1>
-      <p class='text-slate-400 text-sm'>Ugreen DXP4800 Plus · Intel 8505 QSV</p>
     </header>
 
     <nav class='tabs-nav flex gap-1 border-b border-slate-700 mb-6'>
@@ -268,35 +367,66 @@ def _render_page(cfg: Config) -> str:
         </span>
       </div>
 
-      <div class='grid md:grid-cols-2 gap-6'>
-        <section class='card'>
-          <h2 class='font-semibold mb-3 text-lg'>Folders</h2>
-          <ul class='mb-4'>{folders_rows}</ul>
-          <form method='post' action='/api/folders/add' class='flex gap-2'>
-            <input type='text' name='path' placeholder='/media/Movies'
-                   class='flex-1' required>
-            <button class='btn btn-primary'>Add</button>
-          </form>
-          <p class='text-xs text-slate-400 mt-2'>
-            Paths are as seen <em>inside the container</em> — edit
-            <code>docker-compose.yml</code> to add new bind mounts.
-          </p>
-        </section>
+      <section class='card'>
+        <h2 class='font-semibold text-lg mb-1'>Container</h2>
+        <p class='text-xs text-slate-400 mb-4 max-w-2xl'>
+          These settings live in <code>docker-compose.yml</code>. Edit the
+          <strong>Media folders</strong> below and click <strong>Save &amp;
+          Restart app</strong> to apply — any running encode is killed and
+          Docker brings the app back automatically (UI unreachable for ~15
+          seconds).
+        </p>
+        <div id='container-info' hx-get='/api/container' hx-trigger='load'>…</div>
+      </section>
 
+      <div class='grid md:grid-cols-1 gap-6'>
         <section class='card'>
           <h2 class='font-semibold mb-3 text-lg'>Settings</h2>
-          <form method='post' action='/api/settings' class='space-y-3'>
+          <form method='post' action='/api/settings' class='space-y-4'>
             <div>
-              <label class='block text-sm mb-1'>
-                Quality <span class='text-slate-400'>(global_quality — lower = higher quality)</span>
-              </label>
-              <input type='number' name='global_quality' min='18' max='30'
-                     value='{e.global_quality}' class='w-24'>
+              <div class='flex items-baseline justify-between mb-1'>
+                <label class='text-sm'>Quality <span class='text-slate-400'>(higher = bigger file)</span></label>
+                <span id='vhc-quality-val' class='font-mono text-slate-100 text-sm'>CRF {e.global_quality}</span>
+              </div>
+              <input type='range' min='0' max='100' step='1'
+                     value='{quality_pct}' class='vhc-slider'
+                     oninput='vhcQualityUpdate(this)'>
+              <input type='hidden' name='global_quality' id='vhc-quality-crf' value='{e.global_quality}'>
+              <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
+                <span>smaller file</span>
+                <span>higher quality</span>
+              </div>
             </div>
             <div>
-              <label class='block text-sm mb-1'>Preset</label>
-              <select name='preset'>{preset_opts}</select>
+              <div class='flex items-baseline justify-between mb-1'>
+                <label class='text-sm'>Preset <span class='text-slate-400'>(slower = better compression)</span></label>
+                <span id='vhc-preset-val' class='font-mono text-slate-100 text-sm'>{e.preset}</span>
+              </div>
+              <input type='range' min='0' max='{len(PRESETS) - 1}' step='1'
+                     value='{preset_idx}' class='vhc-slider'
+                     oninput="vhcPresetUpdate(this)">
+              <input type='hidden' name='preset' id='vhc-preset-hidden' value='{e.preset}'>
+              <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
+                <span>{PRESETS[0]}</span>
+                <span>{PRESETS[-1]}</span>
+              </div>
             </div>
+            <script>
+              (function() {{
+                const PRESET_NAMES = {PRESETS!r};
+                window.vhcPresetUpdate = function(el) {{
+                  const name = PRESET_NAMES[parseInt(el.value)];
+                  document.getElementById('vhc-preset-val').textContent = name;
+                  document.getElementById('vhc-preset-hidden').value = name;
+                }};
+                window.vhcQualityUpdate = function(el) {{
+                  const pct = parseInt(el.value);
+                  const crf = Math.round(30 - pct * 12 / 100);
+                  document.getElementById('vhc-quality-val').textContent = 'CRF ' + crf;
+                  document.getElementById('vhc-quality-crf').value = crf;
+                }};
+              }})();
+            </script>
             <div>
               <label class='block text-sm mb-1'>
                 Daily sweep time <span class='text-slate-400'>(HH:MM 24-hour local — empty = manual only)</span>
@@ -321,7 +451,7 @@ def _render_page(cfg: Config) -> str:
             <div class='pt-2'>
               <button class='btn btn-primary'>Save settings</button>
               <span class='text-xs text-slate-400 ml-2'>
-                Takes effect at the start of the next scan.
+                Takes effect at the start of the next sweep.
               </span>
             </div>
           </form>
@@ -724,6 +854,131 @@ def _render_recent(cfg: Config) -> str:
     return "<table class='w-full text-sm'>" + "".join(body) + "</table>"
 
 
+def _render_container() -> str:
+    info = _container_info()
+    editable = _can_edit_compose()
+    can_restart = _can_docker_compose()
+
+    qsv_cls = "text-emerald-400" if info["qsv"] == "present" else "text-amber-400"
+    auth_cls = "text-emerald-400" if info["ui_auth"].startswith("password") else "text-amber-400"
+
+    def row(label: str, value_html: str) -> str:
+        return (
+            "<div class='grid grid-cols-[10rem_1fr] gap-2 py-1 border-b border-slate-700 last:border-b-0'>"
+            f"<div class='text-xs text-slate-400 uppercase tracking-wide'>{label}</div>"
+            f"<div class='text-sm'>{value_html}</div>"
+            "</div>"
+        )
+
+    readonly_rows = (
+        row("Timezone",     f"<span class='font-mono'>{_esc(info['timezone'])}</span>")
+        + row("Web UI port",   f"<span class='font-mono'>{_esc(info['ui_port'])}</span>")
+        + row("Auth",          f"<span class='{auth_cls}'>{_esc(info['ui_auth'])}</span>")
+        + row("PUID / PGID",   f"<span class='font-mono'>{_esc(info['puid'])} / {_esc(info['pgid'])}</span>")
+        + row("Intel QSV",     f"<span class='{qsv_cls}'>{_esc(info['qsv'])}</span>")
+    )
+
+    if editable:
+        mounts = _media_mounts_from_compose()
+        if not mounts:
+            mounts = [{"host": "", "container": "/media"}]
+        rows_html = "".join(_mount_row_html(m["host"], m["container"]) for m in mounts)
+        restart_note = "" if can_restart else (
+            "<p class='text-xs text-amber-400 mt-2'>"
+            "Docker socket not available \u2014 saving writes the file but "
+            "does <em>not</em> restart the container. Run "
+            "<code>docker compose up -d</code> on the NAS host to apply."
+            "</p>"
+        )
+        edit_html = f"""
+        <div class='mt-4 pt-4 border-t border-slate-700'>
+          <div class='flex items-center justify-between mb-2'>
+            <h3 class='text-sm font-semibold uppercase tracking-wide text-slate-300'>Media folders</h3>
+            <button type='button' onclick='vhcAddMount()' class='btn btn-ghost text-xs'>+ Add folder</button>
+          </div>
+          <p class='text-xs text-slate-400 mb-3'>
+            Each row is a host path on the NAS. It is bind-mounted into the
+            container <em>and</em> added to the scan list in one step. The
+            container path is auto-derived from the host folder name; edit it
+            manually only if you need to.
+          </p>
+          <form id='vhc-mounts-form'
+                hx-post='/api/container/mounts/save' hx-swap='none'
+                oninput='vhcMarkFormDirty()'
+                onsubmit="if(!confirm('Save folders and restart the app? Any running encode will be killed and the container recreated. The UI may be unreachable for ~15 seconds.'))return false; setTimeout(()=&gt;location.reload(),15000);">
+            <div id='mount-rows' class='space-y-2'>{rows_html}</div>
+            {restart_note}
+            <div class='mt-4'>
+              <button id='vhc-save-btn' class='btn btn-danger disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600' disabled>
+                Save &amp; Restart app
+              </button>
+              <span id='vhc-dirty-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
+            </div>
+          </form>
+        </div>
+        <script>
+          function vhcMarkFormDirty() {{
+            const btn = document.getElementById('vhc-save-btn');
+            const hint = document.getElementById('vhc-dirty-hint');
+            if (btn) {{ btn.disabled = false; }}
+            if (hint) {{ hint.textContent = 'Unsaved changes.'; hint.classList.remove('text-slate-400'); hint.classList.add('text-amber-400'); }}
+          }}
+          function vhcDeriveContainer(hostInput) {{
+            const row = hostInput.parentElement;
+            const containerInput = row.querySelector("input[name='container']");
+            if (containerInput.dataset.userEdited === '1') return;
+            const host = hostInput.value.trim().replace(/\\/+$/, '');
+            if (!host) {{ containerInput.value = ''; return; }}
+            const base = host.split('/').pop() || 'media';
+            containerInput.value = '/media/' + base;
+          }}
+          function vhcMarkEdited(el) {{ el.dataset.userEdited = '1'; }}
+          function vhcRemoveRow(btn) {{ btn.parentElement.remove(); vhcMarkFormDirty(); }}
+          function vhcAddMount() {{
+            const c = document.getElementById('mount-rows');
+            const row = document.createElement('div');
+            row.className = 'flex items-center gap-2';
+            row.innerHTML = "<input type='text' name='host' placeholder='/volume2/Movies' class='flex-1 font-mono text-sm' oninput='vhcDeriveContainer(this)'>"
+              + "<span class='text-slate-500'>&rarr;</span>"
+              + "<input type='text' name='container' placeholder='/media/<name>' class='flex-1 font-mono text-sm' oninput='vhcMarkEdited(this)'>"
+              + "<button type='button' class='text-red-400 hover:text-red-300 px-2' onclick='vhcRemoveRow(this)'>&times;</button>";
+            c.appendChild(row);
+            vhcMarkFormDirty();
+          }}
+          document.querySelectorAll("#mount-rows input[name='container']").forEach(el => {{ if (el.value) el.dataset.userEdited = '1'; }});
+        </script>
+        """
+    else:
+        detected = info["media_mounts"]
+        if detected:
+            mount_html = "".join(
+                f"<div class='font-mono text-xs text-cyan-300'>{_esc(m)}</div>"
+                for m in detected
+            )
+        else:
+            mount_html = "<div class='text-xs text-slate-400'>none detected under /media</div>"
+        edit_html = row("Bind mounts", mount_html) + (
+            "<p class='text-xs text-amber-400 mt-3'>"
+            "docker-compose.yml is not mounted into this container (read-only). "
+            "Edit the file on the NAS host to change bind mounts, then run "
+            "<code>docker compose up -d</code>."
+            "</p>"
+        )
+
+    return readonly_rows + edit_html
+
+
+def _mount_row_html(host: str, container: str) -> str:
+    return (
+        "<div class='flex items-center gap-2'>"
+        f"<input type='text' name='host' value='{_esc(host)}' placeholder='/volume2/Movies' class='flex-1 font-mono text-sm' oninput='vhcDeriveContainer(this)'>"
+        "<span class='text-slate-500'>&rarr;</span>"
+        f"<input type='text' name='container' value='{_esc(container)}' placeholder='/media/<name>' class='flex-1 font-mono text-sm' oninput='vhcMarkEdited(this)'>"
+        "<button type='button' class='text-red-400 hover:text-red-300 px-2' onclick='vhcRemoveRow(this)'>&times;</button>"
+        "</div>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -746,6 +1001,11 @@ def api_progress(_: Auth) -> str:
 @app.get("/api/pies", response_class=HTMLResponse)
 def api_pies(_: Auth) -> str:
     return _render_pies(_load())
+
+
+@app.get("/api/container", response_class=HTMLResponse)
+def api_container(_: Auth) -> str:
+    return _render_container()
 
 
 @app.get("/api/recent", response_class=HTMLResponse)
@@ -783,27 +1043,6 @@ def api_stop(_: Auth) -> JSONResponse:
 @app.get("/api/pending", response_class=HTMLResponse)
 def api_pending(_: Auth) -> str:
     return _render_pending()
-
-
-@app.post("/api/folders/add")
-def api_folders_add(_: Auth, path: Annotated[str, Form()]) -> RedirectResponse:
-    p = Path(path.strip()).resolve()
-    if not p.is_dir():
-        raise HTTPException(400, f"Not a directory: {p}")
-    cfg = _load()
-    s = str(p)
-    if s not in cfg.scan_paths:
-        cfg.scan_paths.append(s)
-        save_config(cfg, _config_path, keys={"scan_paths"})
-    return RedirectResponse("/", status_code=303)
-
-
-@app.post("/api/folders/remove")
-def api_folders_remove(_: Auth, path: Annotated[str, Form()]) -> RedirectResponse:
-    cfg = _load()
-    cfg.scan_paths = [p for p in cfg.scan_paths if p != path]
-    save_config(cfg, _config_path, keys={"scan_paths"})
-    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/api/settings")
@@ -844,6 +1083,105 @@ def api_clear_failed(_: Auth) -> RedirectResponse:
     with sqlite3.connect(cfg.runtime.state_db) as c:
         c.execute("DELETE FROM processed WHERE status='failed'")
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api/container/mounts/save")
+def api_container_mounts_save(
+    _: Auth,
+    host: Annotated[list[str], Form()] = [],
+    container: Annotated[list[str], Form()] = [],
+) -> JSONResponse:
+    if not _can_edit_compose():
+        raise HTTPException(500, "docker-compose.yml is not writable from this container")
+    if len(host) != len(container):
+        raise HTTPException(400, "host and container path counts must match")
+
+    new_entries: list[str] = []
+    seen: set[str] = set()
+    for h, c in zip(host, container):
+        h = h.strip()
+        c = c.strip()
+        if not h and not c:
+            continue
+        if not h or not c:
+            raise HTTPException(400, "both host and container path required for each row")
+        if not (c == "/media" or c.startswith("/media/")):
+            raise HTTPException(400, f"container path {c!r} must be /media or /media/*")
+        if c in seen:
+            raise HTTPException(400, f"container path {c!r} appears more than once")
+        seen.add(c)
+        new_entries.append(f"{h}:{c}")
+
+    doc = _load_compose()
+    if doc is None:
+        raise HTTPException(500, "cannot read docker-compose.yml")
+
+    svc = doc.get("services", {}).get(_COMPOSE_SERVICE)
+    if svc is None:
+        raise HTTPException(500, f"service '{_COMPOSE_SERVICE}' missing from compose file")
+
+    volumes = svc.get("volumes", []) or []
+    # Keep non-/media (system) mounts intact, replace all /media entries.
+    kept = []
+    for v in volumes:
+        _, container_path, _mode = _parse_volume(v)
+        if not (container_path == "/media" or container_path.startswith("/media/")):
+            kept.append(v)
+    svc["volumes"] = kept + new_entries
+
+    _save_compose(doc)
+    log.info("compose media mounts updated: %d entrie(s)", len(new_entries))
+
+    # Mirror the container-side paths into config.yaml scan_paths so a saved
+    # media folder is both bind-mounted and picked up by the discovery pass.
+    cfg = _load()
+    cfg.scan_paths = [entry.split(":", 1)[1] for entry in new_entries]
+    save_config(cfg, _config_path, keys={"scan_paths"})
+
+    if _can_docker_compose():
+        _spawn_compose_recreate()
+        return JSONResponse({"ok": True, "restarted": True, "count": len(new_entries)})
+    return JSONResponse({"ok": True, "restarted": False, "count": len(new_entries)})
+
+
+def _spawn_compose_recreate() -> None:
+    """Recreate this container in a background thread via docker compose up -d."""
+    def _run() -> None:
+        time.sleep(0.5)
+        state.request_stop()
+        try:
+            hostname = os.environ.get("HOSTNAME") or "video-converter"
+            project = subprocess.run(
+                ["docker", "inspect", "--format",
+                 "{{index .Config.Labels \"com.docker.compose.project\"}}", hostname],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or "video_hevc_converter"
+            log.info("running docker compose up -d for project %r", project)
+            subprocess.Popen(
+                ["docker", "compose", "-p", project, "-f", _COMPOSE_PATH, "up", "-d"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            log.error("docker compose up failed (%s) — falling back to SIGTERM", e)
+            os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@app.post("/api/restart")
+def api_restart(_: Auth) -> JSONResponse:
+    log.info("restart requested from UI")
+    if _can_docker_compose():
+        _spawn_compose_recreate()
+        return JSONResponse({"ok": True, "message": "recreating"})
+
+    def _sigterm() -> None:
+        time.sleep(0.5)
+        state.request_stop()
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_sigterm, daemon=True).start()
+    return JSONResponse({"ok": True, "message": "restarting (process only)"})
 
 
 # ---------------------------------------------------------------------------
