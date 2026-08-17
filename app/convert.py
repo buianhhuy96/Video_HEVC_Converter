@@ -84,6 +84,24 @@ def _is_stable(path: Path, wait: float) -> bool:
     return s1.st_size == s2.st_size and s1.st_mtime == s2.st_mtime
 
 
+def _seconds_until(hhmm: str) -> float | None:
+    """Seconds from now until the next local HH:MM. Returns None if invalid/empty."""
+    if not hhmm:
+        return None
+    try:
+        hour, minute = (int(part) for part in hhmm.split(":", 1))
+    except ValueError:
+        return None
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
 def _classify(path: Path, cfg: Config, store: Store):
     """Probe and decide whether `path` needs conversion.
 
@@ -112,14 +130,20 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
              path, info.codec, info.width, info.height, info.duration, info.bit_depth)
 
     if cfg.runtime.dry_run:
-        store.record(path, "skipped", reason="dry_run", orig_codec=info.codec)
+        log.info("DRY-RUN would convert %s (codec=%s)", path, info.codec)
         return
 
     if not _is_stable(path, cfg.runtime.stability_check_seconds):
         log.info("SKIP  %s  (file changing on disk — will retry next scan)", path)
         return
 
-    orig_size = path.stat().st_size
+    try:
+        orig_stat = path.stat()
+    except OSError as e:
+        log.error("ENCODE-FAIL %s  (stat failed: %s)", path, e)
+        return
+    orig_size = orig_stat.st_size
+    orig_mtime = orig_stat.st_mtime
     tmp_out: Path | None = None
     state.set_current(path=str(path), stage="encoding",
                       started_at=time.time(), progress={},
@@ -127,21 +151,27 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
     try:
         tmp_out = transcode(info, cfg)
         state.set_current(stage="validating")
-        validate(info, tmp_out, cfg.validation)
+        validate(info, tmp_out, cfg.validation,
+                 expect_subtitles=cfg.output.copy_subs)
 
         new_size = tmp_out.stat().st_size
-        ratio = new_size / max(orig_size, 1)
-        if ratio > cfg.output.max_size_ratio:
-            log.info(
-                "DISCARD %s: new file %.1f%% of original (> %.0f%% cap) — keeping original",
-                path, ratio * 100, cfg.output.max_size_ratio * 100,
-            )
+
+        # Guard against source-file modification during the (potentially long)
+        # encode: replacing a file the user just re-downloaded would lose data.
+        try:
+            current_stat = path.stat()
+        except OSError as e:
+            log.error("REPLACE-FAIL %s  (source vanished during encode: %s)", path, e)
             tmp_out.unlink(missing_ok=True)
-            store.record(
-                path, "skipped",
-                reason=f"no size gain ({ratio:.2f})",
-                orig_codec=info.codec, orig_size=orig_size, new_size=new_size,
-            )
+            store.record(path, "failed", reason=f"source vanished: {e}",
+                         orig_codec=info.codec)
+            return
+        if (current_stat.st_size != orig_size
+                or abs(current_stat.st_mtime - orig_mtime) > 1.0):
+            log.warning("REPLACE-FAIL %s  (source modified during encode)", path)
+            tmp_out.unlink(missing_ok=True)
+            store.record(path, "failed", reason="source modified during encode",
+                         orig_codec=info.codec)
             return
 
         state.set_current(stage="replacing")
@@ -150,7 +180,7 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             "DONE  %s -> %s  %.1f MiB -> %.1f MiB (%.0f%%)",
             path.name, final.name,
             orig_size / 1024 / 1024, new_size / 1024 / 1024,
-            ratio * 100,
+            new_size / max(orig_size, 1) * 100,
         )
         store.record(
             final, "ok",
@@ -256,7 +286,7 @@ def main() -> int:
     _setup_logging(cfg.runtime.log_file)
     _install_signal_handlers()
 
-    log.info("=== Video HEVC Converter — Ugreen DXP4800 Plus (Intel 8505 QSV) ===")
+    log.info("=== Video HEVC Converter ===")
     if has_qsv_device():
         log.info("Intel /dev/dri/renderD128 present — QSV path available")
     else:
@@ -275,32 +305,36 @@ def main() -> int:
              ui_port,
              "password required" if os.environ.get("UI_PASSWORD") else "OPEN — no password")
 
-    # Kick off with an immediate discovery so users see the pending list
-    # populated as soon as the container starts.
-    state.request_scan_now()
+    # Kick off with an immediate sweep so the service works out of the box.
+    state.request_sweep_now()
 
     while not _shutdown:
         try:
             cfg = load_config()
-            interval_secs = max(1.0, cfg.runtime.scan_interval_hours * 3600)
-            action = state.wait_for_action(interval_secs) or "scan"
+            delay = _seconds_until(cfg.runtime.sweep_at_time)
+
+            if delay is not None:
+                action = state.wait_for_action(delay) or "sweep"
+            else:
+                action = state.wait_for_action(365 * 24 * 3600) or "wake"
+
             if _shutdown:
                 break
-            if action == "scan":
+
+            if action == "sweep":
+                log.info("scheduled sweep — discover + convert")
                 discover(cfg, store)
-                if cfg.runtime.auto_convert and state.pending_count() > 0:
-                    log.info("auto_convert enabled — starting conversion")
+                if state.pending_count() > 0 and not _shutdown:
                     convert_pending(cfg, store)
+            elif action == "scan":
+                discover(cfg, store)
             elif action == "convert":
                 convert_pending(cfg, store)
-            # 'wake' actions (shutdown) fall through the loop and re-check _shutdown
+            # 'wake' actions (shutdown) fall through to re-check _shutdown
         except Exception:  # noqa: BLE001
             log.exception("cycle aborted with unexpected error")
 
         if _shutdown:
-            break
-        if cfg.runtime.scan_interval_hours <= 0:
-            log.info("scan_interval_hours=0 → one-shot mode, exiting")
             break
 
     log.info("exiting")

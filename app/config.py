@@ -19,20 +19,19 @@ except ImportError:  # optional: PyYAML fallback loses comments on write
 @dataclass
 class EncoderCfg:
     codec: str = "hevc_qsv"
-    fallback_codec: str = "libx265"
-    global_quality: int = 23
-    preset: str = "slower"
+    global_quality: int = 21
+    preset: str = "veryslow"
     look_ahead: bool = True
     look_ahead_depth: int = 40
     allow_10bit: bool = True
-    fallback_crf: int = 22
     max_bitrate_kbps: int = 0
+    deband: bool = False
+    preserve_color_metadata: bool = True
 
 
 @dataclass
 class OutputCfg:
     fallback_container: str = ".mkv"
-    max_size_ratio: float = 1.0
     copy_audio: bool = True
     copy_subs: bool = True
 
@@ -55,12 +54,10 @@ class RuntimeCfg:
     stall_timeout_seconds: int = 300
     # Skip files whose size/mtime change within this window (still being written).
     stability_check_seconds: float = 2.0
-    # Hours between library scans (fractional supported; 0 = one-shot then exit).
-    scan_interval_hours: float = 1.0
-    # When True, encoding starts immediately after a scan finishes.
-    # When False, the scanner just lists candidates and waits for the
-    # "Convert" button in the web UI.
-    auto_convert: bool = True
+    # Time of day (HH:MM, 24-hour, local timezone) for the automatic sweep
+    # (scan + convert). Empty string disables scheduling; use the web UI to
+    # trigger manually.
+    sweep_at_time: str = "03:00"
 
 
 @dataclass
@@ -82,6 +79,15 @@ def _lower_set(items) -> set[str]:
     return {str(x).lower() for x in (items or [])}
 
 
+def _merge_section(defaults, raw_section):
+    """Merge a YAML section into a dataclass, silently dropping unknown keys."""
+    if not raw_section:
+        return defaults
+    known = defaults.__dataclass_fields__
+    filtered = {k: v for k, v in raw_section.items() if k in known}
+    return type(defaults)(**{**defaults.__dict__, **filtered})
+
+
 def load_config(path: str | None = None) -> Config:
     path = path or os.environ.get("CONFIG_PATH", "/config/config.yaml")
     with open(path, "r", encoding="utf-8") as f:
@@ -96,14 +102,10 @@ def load_config(path: str | None = None) -> Config:
     cfg.raw_filename_markers = [str(m).lower() for m in raw.get("raw_filename_markers", [])]
     cfg.min_size_bytes = int(raw.get("min_size_bytes", cfg.min_size_bytes))
 
-    if "encoder" in raw:
-        cfg.encoder = EncoderCfg(**{**cfg.encoder.__dict__, **raw["encoder"]})
-    if "output" in raw:
-        cfg.output = OutputCfg(**{**cfg.output.__dict__, **raw["output"]})
-    if "validation" in raw:
-        cfg.validation = ValidationCfg(**{**cfg.validation.__dict__, **raw["validation"]})
-    if "runtime" in raw:
-        cfg.runtime = RuntimeCfg(**{**cfg.runtime.__dict__, **raw["runtime"]})
+    cfg.encoder = _merge_section(cfg.encoder, raw.get("encoder"))
+    cfg.output = _merge_section(cfg.output, raw.get("output"))
+    cfg.validation = _merge_section(cfg.validation, raw.get("validation"))
+    cfg.runtime = _merge_section(cfg.runtime, raw.get("runtime"))
 
     Path(cfg.runtime.work_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.runtime.log_file).parent.mkdir(parents=True, exist_ok=True)

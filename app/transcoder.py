@@ -34,14 +34,24 @@ def _choose_container(src: Path, cfg: Config) -> str:
     return ext if ext in HEVC_SAFE_CONTAINERS else cfg.output.fallback_container
 
 
-def _stream_map_args(cfg: Config) -> list[str]:
-    """Map only real video (excluding cover art), plus untouched audio/subs/fonts.
+def _pre_filters(cfg: Config) -> str:
+    """Software-domain filter chain applied before the encoder."""
+    filters = []
+    if cfg.encoder.deband:
+        filters.append("gradfun=1.5:8")
+    return ",".join(filters)
 
-    Using 0:V? instead of 0:v ensures attached_pic thumbnails aren't fed to the
-    HEVC encoder. Audio, subtitles, and attachments (e.g. ASS fonts) are copied
-    stream-for-stream; data streams are dropped because most containers reject them.
+
+def _stream_map_args(cfg: Config, info: VideoInfo) -> list[str]:
+    """Map main video for encoding + cover art / audio / subs / attachments to copy.
+
+    `0:V?` selects real video streams (excluding attached_pic) — those get
+    encoded. Cover art is mapped separately so it can be bit-copied via a
+    per-stream codec override (see `_common_output_args`).
     """
     args = ["-map", "0:V?"]
+    if info.attached_pic_streams > 0:
+        args += ["-map", "0:v:m:attached_pic?"]
     if cfg.output.copy_audio:
         args += ["-map", "0:a?"]
     if cfg.output.copy_subs:
@@ -50,9 +60,13 @@ def _stream_map_args(cfg: Config) -> list[str]:
     return args
 
 
-def _common_output_args(out_ext: str, cfg: Config) -> list[str]:
+def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]:
     """Codec + container flags for streams other than the main video."""
     args: list[str] = []
+    if info.attached_pic_streams > 0:
+        # The main video encoder is set by the per-encoder builder; per-stream
+        # override keeps cover art (mapped second) as a bit-copy.
+        args += ["-c:v:1", "copy"]
     if cfg.output.copy_audio:
         args += ["-c:a", "copy"]
     if cfg.output.copy_subs:
@@ -60,6 +74,15 @@ def _common_output_args(out_ext: str, cfg: Config) -> list[str]:
         args += ["-c:s", "copy"]
     else:
         args += ["-sn"]
+    if cfg.encoder.preserve_color_metadata:
+        if info.color_primaries:
+            args += ["-color_primaries", info.color_primaries]
+        if info.color_trc:
+            args += ["-color_trc", info.color_trc]
+        if info.color_space:
+            args += ["-colorspace", info.color_space]
+        if info.color_range:
+            args += ["-color_range", info.color_range]
     args += ["-map_metadata", "0", "-map_chapters", "0"]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
@@ -70,7 +93,9 @@ def _build_qsv_cmd(
     src: Path, dst: Path, info: VideoInfo, cfg: Config, *, hw_decode: bool
 ) -> list[str]:
     enc = cfg.encoder
-    ten_bit = enc.allow_10bit and info.bit_depth >= 10
+    # Always emit 10-bit main10 when allowed: matches libx265 fallback and
+    # avoids encoder-introduced banding on smooth 8-bit sources.
+    ten_bit = enc.allow_10bit
     out_ext = dst.suffix.lower()
 
     cmd: list[str] = [
@@ -83,12 +108,21 @@ def _build_qsv_cmd(
         cmd += ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
 
     cmd += ["-i", str(src)]
-    cmd += _stream_map_args(cfg)
+    cmd += _stream_map_args(cfg, info)
 
-    if not hw_decode:
+    if hw_decode:
+        if ten_bit and info.bit_depth < 10:
+            # Convert 8-bit HW-decoded surfaces to 10-bit on the iGPU.
+            cmd += ["-filter:v:0", "scale_qsv=format=p010le"]
+    else:
         # SW-decoded frames must be uploaded to the iGPU before hevc_qsv accepts them.
+        # Scope to output video stream 0 so mapped cover art (stream 1) is untouched.
         sw_fmt = "p010le" if ten_bit else "nv12"
-        cmd += ["-vf", f"format={sw_fmt},hwupload=extra_hw_frames=64"]
+        pre = _pre_filters(cfg)
+        chain = f"format={sw_fmt},hwupload=extra_hw_frames=64"
+        if pre:
+            chain = f"{pre},{chain}"
+        cmd += ["-filter:v:0", chain]
 
     cmd += [
         "-c:v", "hevc_qsv",
@@ -96,7 +130,6 @@ def _build_qsv_cmd(
         "-global_quality", str(enc.global_quality),
     ]
     if not hw_decode:
-        # In the HW-decode path the encoder infers pix_fmt from QSV surfaces.
         cmd += ["-pix_fmt", "p010le" if ten_bit else "nv12"]
 
     if enc.look_ahead:
@@ -108,14 +141,15 @@ def _build_qsv_cmd(
             "-bufsize", f"{enc.max_bitrate_kbps * 2}k",
         ]
 
-    cmd += _common_output_args(out_ext, cfg)
+    cmd += _common_output_args(out_ext, cfg, info)
     cmd += [str(dst)]
     return cmd
 
 
 def _build_x265_cmd(src: Path, dst: Path, info: VideoInfo, cfg: Config) -> list[str]:
     enc = cfg.encoder
-    ten_bit = enc.allow_10bit and info.bit_depth >= 10
+    # Always emit 10-bit main10 when allowed: matches QSV path.
+    ten_bit = enc.allow_10bit
     out_ext = dst.suffix.lower()
 
     cmd = [
@@ -123,15 +157,23 @@ def _build_x265_cmd(src: Path, dst: Path, info: VideoInfo, cfg: Config) -> list[
         "-loglevel", "warning",
         "-i", str(src),
     ]
-    cmd += _stream_map_args(cfg)
+    cmd += _stream_map_args(cfg, info)
+    pre = _pre_filters(cfg)
+    if pre:
+        cmd += ["-filter:v:0", pre]
     cmd += [
         "-c:v", "libx265",
-        "-preset", "medium",
-        "-crf", str(enc.fallback_crf),
+        "-preset", enc.preset,
+        "-crf", str(enc.global_quality),
         "-pix_fmt", "yuv420p10le" if ten_bit else "yuv420p",
         "-x265-params", "log-level=error",
     ]
-    cmd += _common_output_args(out_ext, cfg)
+    if enc.max_bitrate_kbps > 0:
+        cmd += [
+            "-maxrate", f"{enc.max_bitrate_kbps}k",
+            "-bufsize", f"{enc.max_bitrate_kbps * 2}k",
+        ]
+    cmd += _common_output_args(out_ext, cfg, info)
     cmd += [str(dst)]
     return cmd
 
@@ -149,7 +191,9 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
 
     attempts: list[tuple[str, list[str]]] = []
     if cfg.encoder.codec == "hevc_qsv" and has_qsv_device():
-        attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
+        # Deband runs in software, so skip full-HW (no QSV-native deband filter).
+        if not cfg.encoder.deband:
+            attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
         attempts.append(("QSV encode-only", _build_qsv_cmd(src, dst, info, cfg, hw_decode=False)))
     attempts.append(("libx265", _build_x265_cmd(src, dst, info, cfg)))
 
@@ -277,24 +321,64 @@ def atomic_replace(src: Path, new_file: Path, cfg: Config) -> Path:
 
     Same base name is kept. Extension follows `new_file` (may differ from src
     when we remuxed a legacy container, e.g. .avi → .mkv).
+
+    Refuses to clobber an unrelated file that already lives at the target path,
+    and stages the encoded output next to the source so the final swap is a
+    same-filesystem rename — no partial file can remain at the final path if
+    a cross-filesystem copy fails.
     """
     orig_stat = src.stat()
     final_path = src.with_suffix(new_file.suffix)
 
+    if final_path.exists() and final_path != src:
+        raise RuntimeError(
+            f"refusing to overwrite existing file at target: {final_path}"
+        )
+
+    # Copy the encoded file into the source directory first. This turns the
+    # subsequent rename into a same-filesystem atomic operation.
+    staged = src.with_name(f".{src.stem}.converting.staged{new_file.suffix}")
+    if staged.exists():
+        staged.unlink()
+    try:
+        _move_or_copy(new_file, staged)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
+
     if cfg.runtime.delete_original:
         backup = src.with_suffix(src.suffix + ".converting.bak")
-        _move_or_copy(src, backup)
+        if backup.exists():
+            backup.unlink()
+        os.rename(src, backup)
         try:
-            shutil.move(str(new_file), str(final_path))
-        except Exception:
-            if backup.exists() and not src.exists():
-                _move_or_copy(backup, src)
+            os.rename(staged, final_path)
+        except OSError:
+            try:
+                os.rename(backup, src)
+            except OSError:
+                log.exception(
+                    "CRITICAL: failed to restore %s after replacement error", src
+                )
+            staged.unlink(missing_ok=True)
             raise
         backup.unlink(missing_ok=True)
     else:
         keep = src.with_name(f"{src.stem}.orig{src.suffix}")
-        _move_or_copy(src, keep)
-        shutil.move(str(new_file), str(final_path))
+        if keep.exists():
+            keep.unlink()
+        os.rename(src, keep)
+        try:
+            os.rename(staged, final_path)
+        except OSError:
+            try:
+                os.rename(keep, src)
+            except OSError:
+                log.exception(
+                    "CRITICAL: failed to restore %s after replacement error", src
+                )
+            staged.unlink(missing_ok=True)
+            raise
 
     try:
         os.utime(final_path, (orig_stat.st_atime, orig_stat.st_mtime))

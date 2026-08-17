@@ -56,7 +56,9 @@ class Store:
         # Reprocess if file changed on disk.
         if size != st.st_size or abs(mtime - st.st_mtime) > 1.0:
             return False
-        return status in ("ok", "skipped")
+        # Failed rows stay "done" so the same broken file isn't retried
+        # every scan. Users can retry via the "Retry failed" UI button.
+        return status in ("ok", "skipped", "failed")
 
     def record(self, path: Path, status: str, **fields) -> None:
         try:

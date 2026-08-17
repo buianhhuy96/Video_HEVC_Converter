@@ -53,6 +53,11 @@ def request_convert_now() -> None:
     _action_q.put("convert")
 
 
+def request_sweep_now() -> None:
+    """Trigger a full sweep (discover + convert) via the action queue."""
+    _action_q.put("sweep")
+
+
 def request_wake() -> None:
     """Wake the main loop without triggering an action (used by shutdown)."""
     _action_q.put("wake")

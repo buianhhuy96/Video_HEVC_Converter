@@ -299,27 +299,11 @@ def _render_page(cfg: Config) -> str:
             </div>
             <div>
               <label class='block text-sm mb-1'>
-                Scan interval <span class='text-slate-400'>(hours — fractional OK, 0 = one-shot)</span>
+                Daily sweep time <span class='text-slate-400'>(HH:MM 24-hour local — empty = manual only)</span>
               </label>
-              <input type='number' name='scan_interval_hours' step='0.25' min='0'
-                     value='{r.scan_interval_hours:g}' class='w-32'>
+              <input type='text' name='sweep_at_time' pattern='^([01]\d|2[0-3]):[0-5]\d$|^$'
+                     value='{r.sweep_at_time}' placeholder='03:00' class='w-32'>
             </div>
-            <div>
-              <label class='block text-sm mb-1'>
-                Max size vs original
-                <span class='text-slate-400'>
-                  (1.0 = keep anything not larger; lower requires actual savings)
-                </span>
-              </label>
-              <input type='number' name='max_size_ratio' step='0.05' min='0.1' max='1.0'
-                     value='{o.max_size_ratio}' class='w-24'>
-            </div>
-            <label class='flex items-center gap-2 text-sm'>
-              <input type='checkbox' name='auto_convert'
-                     {"checked" if r.auto_convert else ""}>
-              Auto-convert after each scan (uncheck to require clicking
-              <b>Convert</b>)
-            </label>
             <label class='flex items-center gap-2 text-sm'>
               <input type='checkbox' name='delete_original'
                      {"checked" if r.delete_original else ""}>
@@ -329,6 +313,11 @@ def _render_page(cfg: Config) -> str:
               <input type='checkbox' name='dry_run' {"checked" if r.dry_run else ""}>
               Dry run (analyse only, no encoding)
             </label>
+            <p class='text-xs text-slate-400'>
+              A background sweep (scan + convert) runs daily at
+              <b>{r.sweep_at_time or 'never (manual only)'}</b>. Use <b>Scan now</b> or
+              <b>Convert queued files</b> for one-shot manual runs.
+            </p>
             <div class='pt-2'>
               <button class='btn btn-primary'>Save settings</button>
               <span class='text-xs text-slate-400 ml-2'>
@@ -820,31 +809,31 @@ def api_folders_remove(_: Auth, path: Annotated[str, Form()]) -> RedirectRespons
 @app.post("/api/settings")
 def api_settings(
     _: Auth,
-    global_quality: Annotated[int, Form()] = 23,
-    preset: Annotated[str, Form()] = "slower",
-    scan_interval_hours: Annotated[float, Form()] = 1.0,
-    max_size_ratio: Annotated[float, Form()] = 1.0,
+    global_quality: Annotated[int, Form()] = 21,
+    preset: Annotated[str, Form()] = "veryslow",
+    sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
-    auto_convert: Annotated[str | None, Form()] = None,
 ) -> RedirectResponse:
     if not 18 <= global_quality <= 30:
         raise HTTPException(400, "global_quality must be 18-30")
     if preset not in PRESETS:
         raise HTTPException(400, f"preset must be one of {PRESETS}")
-    if not 0.1 <= max_size_ratio <= 1.0:
-        raise HTTPException(400, "max_size_ratio must be 0.1-1.0")
-    if scan_interval_hours < 0:
-        raise HTTPException(400, "scan_interval_hours must be >= 0")
+    sweep_at_time = sweep_at_time.strip()
+    if sweep_at_time:
+        try:
+            h_str, m_str = sweep_at_time.split(":", 1)
+            if not (0 <= int(h_str) < 24 and 0 <= int(m_str) < 60):
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise HTTPException(400, "sweep_at_time must be HH:MM (24-hour) or empty")
 
     cfg = _load()
     cfg.encoder.global_quality = global_quality
     cfg.encoder.preset = preset
-    cfg.runtime.scan_interval_hours = scan_interval_hours
+    cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
-    cfg.runtime.auto_convert = bool(auto_convert)
-    cfg.output.max_size_ratio = max_size_ratio
     save_config(cfg, _config_path, keys={"encoder", "output", "runtime"})
     return RedirectResponse("/", status_code=303)
 

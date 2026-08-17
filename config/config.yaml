@@ -84,29 +84,38 @@ min_size_bytes: 20971520   # 20 MiB
 encoder:
   # "hevc_qsv" = Intel hardware HEVC encoder. Falls back to libx265 if unavailable.
   codec: hevc_qsv
-  fallback_codec: libx265
 
   # ICQ (Intelligent Constant Quality) — quality-based, closest to CRF.
   # Lower = higher quality / larger file. Sensible range: 20 (high) – 26 (small).
-  # 23 is a good balance for 1080p movie library, giving ~40-60% smaller than H.264.
-  global_quality: 23
+  # 21 targets cleaner output for demanding playback (e.g. madVR post-processing).
+  # libx265 uses this same value as its CRF when the GPU path isn't available.
+  global_quality: 21
 
-  # Slower preset = better compression at the same quality. The 8505 handles
-  # "slower" comfortably in real time for 1080p, ~1.5x realtime for 4K.
-  preset: slower
+  # Slower preset = better compression at the same quality. "veryslow" is the
+  # highest reasonable setting; QSV runs it well and libx265 uses it if it's
+  # ever engaged (accept the CPU cost when the NAS is idle at night).
+  preset: veryslow
 
   # Lookahead improves quality on scene changes. Depth in frames.
   look_ahead: true
   look_ahead_depth: 40
 
-  # Preserve 10-bit content (HDR, high-quality sources). Auto-detected per file.
+  # Emit 10-bit HEVC (main10) for every source when true. Preserves 10-bit
+  # sources and avoids encoder-introduced banding on 8-bit sources at the
+  # cost of ~5–15% larger files and requires a decoder that supports main10.
   allow_10bit: true
-
-  # libx265 CRF used only when hevc_qsv is unavailable.
-  fallback_crf: 22
 
   # Cap output bitrate as a sanity ceiling (0 = disabled).
   max_bitrate_kbps: 0
+
+  # Light debanding filter (gradfun=1.5:8) applied before the encoder.
+  # Helps dark scenes and animation. Forces the QSV encode-only path
+  # (skips full-HW decode) because there is no QSV-native deband filter.
+  deband: false
+
+  # Copy color primaries / transfer / matrix / range tags from the source
+  # to the output. Prevents playback tools from guessing (e.g. madVR).
+  preserve_color_metadata: true
 
 # ---------------------------------------------------------------------------
 # Output container rules
@@ -115,11 +124,6 @@ output:
   # Keep original extension when the container supports HEVC (mp4/mkv/mov/ts).
   # For legacy containers (avi/wmv/flv/vob/mpg) remux into this container:
   fallback_container: .mkv
-
-  # Discard the new file only if it grew beyond `original * this ratio`.
-  # 1.0 = keep anything that isn't bigger than the source (default).
-  # Lower (e.g. 0.95) requires the new file to be measurably smaller.
-  max_size_ratio: 1.0
 
   # Copy all audio, subtitle, and attachment streams unchanged.
   copy_audio: true
@@ -157,10 +161,9 @@ runtime:
   # Wait this long and re-stat a file to make sure it isn't currently
   # being written (in-progress download, capture, etc.). Set 0 to disable.
   stability_check_seconds: 2.0
-  # Hours between full library sweeps. Fractional supported (0.5 = 30 min).
-  # 0 = run one scan then exit (useful for cron-style scheduling).
-  scan_interval_hours: 1.0
-  # If true, encoding starts automatically after every scan finishes.
-  # If false, the scanner just populates the "Pending" list; encoding waits
-  # until you click the Convert button in the web UI.
-  auto_convert: true
+  # Time of day (HH:MM, 24-hour, container's local timezone — see the TZ env
+  # variable in docker-compose.yml) for the automatic sweep. Each sweep
+  # discovers new files AND converts them. Empty string disables scheduling
+  # (use the web UI's "Scan now" / "Convert queued files" buttons for manual
+  # runs). A sweep always runs at container startup regardless of this value.
+  sweep_at_time: "03:00"

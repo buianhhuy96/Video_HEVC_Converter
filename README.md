@@ -21,6 +21,8 @@ the device is unavailable or hardware encoding fails, it uses CPU-based
 | Raw / log / intermediate codecs (ProRes, DNxHR, CineForm, FFV1, HuffYUV, MJPEG, rawvideo, …) | skip |
 | Raw containers (`.braw`, `.r3d`, `.ari`, `.mxf`, `.dng`, `.crm`) | skip |
 | Filenames containing `slog`, `vlog`, `flog`, `_log`, `prores`, `master`, … | skip |
+| 4:2:2 or 4:4:4 chroma sources (would downsample to 4:2:0) | skip |
+| Sources deeper than 10-bit (no lossless HEVC profile in this pipeline)   | skip |
 | Files smaller than `min_size_bytes` (default 20 MiB) | skip |
 | Everything else (H.264, MPEG-2, MPEG-4 Part 2, VC-1, WMV, …) | **transcode → HEVC** |
 
@@ -28,16 +30,18 @@ Full list is in [config/config.yaml](config/config.yaml) — edit to taste.
 
 ## Corruption safety
 
-Before the original is replaced, the new file must pass:
+Before the original is replaced, the new file must pass every check below:
 
 1. `ffprobe` parses cleanly and reports ≥ 1 video stream.
-2. Audio stream count matches the source.
-3. Duration is within `duration_tolerance_seconds` (default 1.5 s).
-4. Full `ffmpeg -f null` decode pass with `-xerror` — any decode error, drop it.
-5. New file must be at most `max_size_ratio` × original size (default 95%);
-   otherwise the transcode is discarded and the original is kept.
+2. Output codec is `hevc` (silent codec passthrough is rejected).
+3. Bit depth is not downgraded; width and height match the source.
+4. Video, audio, and subtitle stream counts match the source.
+5. Duration is within `duration_tolerance_seconds` (default 1.5 s).
+6. Full `ffmpeg -f null` decode pass with `-xerror` — any decode error, drop it.
+7. Source file's size and mtime are unchanged since the encode started — a file
+   that was modified during encoding is never overwritten.
 
-Only after all five pass does the atomic swap happen. On failure, the temp file
+Only after all pass does the atomic swap happen. On failure, the temp file
 is deleted, the original is untouched, and the failure is recorded in
 `state/converter.db`.
 
@@ -67,9 +71,12 @@ is deleted, the original is untouched, and the failure is recorded in
    docker compose logs -f
    ```
 
-Set `SCAN_INTERVAL=0` in `docker-compose.yml` to run one pass and exit
-(useful for cron-style scheduling). Any other value = loop with that sleep in
-seconds between scans.
+Set `runtime.sweep_at_time: "03:00"` in [config/config.yaml](config/config.yaml)
+to run one full sweep (scan + convert) every day at that local time (container
+timezone follows the `TZ` variable in `docker-compose.yml`). Set it to `""` to
+disable the automatic sweep and rely only on the UI's **Scan now** and
+**Convert queued files** buttons. A sweep always runs at container startup
+either way.
 
 ## Tuning quality vs size
 

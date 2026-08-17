@@ -63,18 +63,15 @@ min_size_bytes: 20971520
 
 encoder:
   codec: hevc_qsv
-  fallback_codec: libx265
-  global_quality: 23
-  preset: slower
+  global_quality: 21
+  preset: veryslow
   look_ahead: true
   look_ahead_depth: 40
   allow_10bit: true
-  fallback_crf: 22
   max_bitrate_kbps: 0
 
 output:
   fallback_container: .mkv
-  max_size_ratio: 1.0
   copy_audio: true
   copy_subs: true
 
@@ -91,8 +88,7 @@ runtime:
   dry_run: false
   stall_timeout_seconds: 300
   stability_check_seconds: 2.0
-  scan_interval_hours: 1.0
-  auto_convert: false
+  sweep_at_time: "03:00"
 """, encoding="utf-8")
 
 os.environ["CONFIG_PATH"] = str(CONFIG_PATH)
@@ -194,7 +190,7 @@ state.set_pending(_sample_pending())
 
 
 def _fake_encoder() -> None:
-    """Runs only when the user clicks Convert (or auto_convert is on).
+    """Runs when the user clicks Convert in the UI.
 
     Drains the pending list one file at a time, walking each through
     probing → encoding → validating → replacing with live progress.

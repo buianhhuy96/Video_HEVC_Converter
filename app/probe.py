@@ -13,7 +13,8 @@ from config import Config
 log = logging.getLogger(__name__)
 
 # Containers that natively support HEVC — safe to keep the same extension.
-HEVC_SAFE_CONTAINERS = {".mp4", ".mkv", ".mov", ".m4v", ".ts", ".mts", ".m2ts", ".webm"}
+# WebM is intentionally excluded: it standardises on VP8/VP9/AV1, not HEVC.
+HEVC_SAFE_CONTAINERS = {".mp4", ".mkv", ".mov", ".m4v", ".ts", ".mts", ".m2ts"}
 
 
 @dataclass
@@ -25,9 +26,15 @@ class VideoInfo:
     height: int
     duration: float
     bit_depth: int
+    chroma: str
     video_streams: int
     audio_streams: int
     subtitle_streams: int
+    attached_pic_streams: int
+    color_primaries: str
+    color_trc: str
+    color_space: str
+    color_range: str
 
 
 class Skip(Exception):
@@ -46,26 +53,58 @@ def ffprobe(path: Path) -> dict:
     return json.loads(res.stdout)
 
 
+def _parse_pix_fmt(pix_fmt: str) -> tuple[int, str]:
+    """Return (bit_depth, chroma_subsampling) parsed from an ffprobe pix_fmt."""
+    p = (pix_fmt or "").lower()
+    if "444" in p:
+        chroma = "444"
+    elif "422" in p:
+        chroma = "422"
+    else:
+        chroma = "420"
+    if "12le" in p or "12be" in p or "p012" in p:
+        depth = 12
+    elif "10le" in p or "10be" in p or "p010" in p:
+        depth = 10
+    elif "16le" in p or "16be" in p:
+        depth = 16
+    else:
+        depth = 8
+    return depth, chroma
+
+
 def probe_video(path: Path) -> VideoInfo:
     data = ffprobe(path)
     streams = data.get("streams", [])
-    v_streams = [s for s in streams if s.get("codec_type") == "video"]
+    all_v = [s for s in streams if s.get("codec_type") == "video"]
+    attached_pic = [
+        s for s in all_v
+        if s.get("disposition", {}).get("attached_pic", 0) == 1
+    ]
+    v_streams = [
+        s for s in all_v
+        if s.get("disposition", {}).get("attached_pic", 0) == 0
+    ]
     a_streams = [s for s in streams if s.get("codec_type") == "audio"]
     s_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
 
     if not v_streams:
         raise Skip("no video stream")
 
-    # Pick the first non-cover-art video stream.
-    v = next(
-        (s for s in v_streams
-         if s.get("disposition", {}).get("attached_pic", 0) == 0),
-        v_streams[0],
-    )
+    v = v_streams[0]
 
     codec = (v.get("codec_name") or "").lower()
     pix_fmt = (v.get("pix_fmt") or "").lower()
-    bit_depth = 10 if ("10le" in pix_fmt or "10be" in pix_fmt or "p010" in pix_fmt) else 8
+    bit_depth, chroma = _parse_pix_fmt(pix_fmt)
+
+    def _clean(tag: str) -> str:
+        val = (v.get(tag) or "").lower()
+        return "" if val in ("", "unknown", "reserved") else val
+
+    color_primaries = _clean("color_primaries")
+    color_trc = _clean("color_transfer")
+    color_space = _clean("color_space")
+    color_range = _clean("color_range")
 
     duration = 0.0
     fmt = data.get("format", {})
@@ -88,9 +127,15 @@ def probe_video(path: Path) -> VideoInfo:
         height=int(v.get("height", 0) or 0),
         duration=duration,
         bit_depth=bit_depth,
+        chroma=chroma,
         video_streams=len(v_streams),
         audio_streams=len(a_streams),
         subtitle_streams=len(s_streams),
+        attached_pic_streams=len(attached_pic),
+        color_primaries=color_primaries,
+        color_trc=color_trc,
+        color_space=color_space,
+        color_range=color_range,
     )
 
 
@@ -122,6 +167,12 @@ def classify(path: Path, cfg: Config) -> VideoInfo:
 
     if info.codec in cfg.skip_codecs:
         raise Skip(f"already efficient codec: {info.codec}")
+
+    if info.chroma != "420":
+        raise Skip(f"chroma {info.chroma} — skipped to avoid downsample to 4:2:0")
+
+    if info.bit_depth > 10:
+        raise Skip(f"{info.bit_depth}-bit source — skipped (no lossless HEVC path here)")
 
     return info
 
