@@ -1,0 +1,107 @@
+#!/bin/bash
+# postinst — Video HEVC Converter
+set -e
+
+APP_USER=video-converter
+APP_HOME=/var/lib/video-hevc-converter
+APP_LIB=/usr/lib/video-hevc-converter
+APP_LOG=/var/log/video-hevc-converter
+CONFIG_TMPL=/usr/share/video-hevc-converter/config.yaml
+CONFIG_FILE=$APP_HOME/config.yaml
+
+case "$1" in
+    configure)
+        # 1. System user in render + video groups (for /dev/dri access).
+        if ! getent passwd "$APP_USER" >/dev/null; then
+            adduser --system --group --no-create-home \
+                --home "$APP_HOME" \
+                --gecos "Video HEVC Converter service" \
+                "$APP_USER"
+        fi
+        for g in render video; do
+            if getent group "$g" >/dev/null; then
+                gpasswd -a "$APP_USER" "$g" >/dev/null 2>&1 || true
+            fi
+        done
+
+        # 2. Runtime directories.
+        mkdir -p "$APP_HOME/tmp" "$APP_LOG"
+        chown -R "$APP_USER:$APP_USER" "$APP_HOME" "$APP_LOG"
+        chmod 0750 "$APP_HOME" "$APP_LOG"
+
+        # 3. Copy default config on first install only.
+        if [ ! -f "$CONFIG_FILE" ] && [ -f "$CONFIG_TMPL" ]; then
+            cp "$CONFIG_TMPL" "$CONFIG_FILE"
+            chown "$APP_USER:$APP_USER" "$CONFIG_FILE"
+            chmod 0640 "$CONFIG_FILE"
+            echo "==> Installed default config at $CONFIG_FILE"
+        fi
+
+        # 4. Python venv with pinned deps.
+        if [ ! -x "$APP_LIB/venv/bin/python3" ]; then
+            echo "==> Creating Python venv at $APP_LIB/venv (needs internet)"
+            python3 -m venv "$APP_LIB/venv"
+            "$APP_LIB/venv/bin/pip" install --quiet --upgrade pip
+            "$APP_LIB/venv/bin/pip" install --quiet \
+                -r /usr/share/video-hevc-converter/requirements.txt
+        else
+            echo "==> Python venv already exists at $APP_LIB/venv (kept)"
+        fi
+
+        # 5. Intel QSV / drivers check (informational).
+        echo ""
+        echo "==> Intel QSV hardware acceleration check:"
+        qsv_ok=1
+        if [ -e /dev/dri/renderD128 ]; then
+            echo "    [OK]   /dev/dri/renderD128 present"
+        else
+            echo "    [WARN] /dev/dri/renderD128 not found (no Intel iGPU or drivers missing)"
+            qsv_ok=0
+        fi
+        if command -v ffmpeg >/dev/null && ffmpeg -hide_banner -encoders 2>&1 | grep -qE '^ V.*hevc_qsv'; then
+            echo "    [OK]   ffmpeg supports the hevc_qsv encoder"
+        else
+            echo "    [WARN] ffmpeg does not expose the hevc_qsv encoder"
+            qsv_ok=0
+        fi
+        if command -v vainfo >/dev/null 2>&1; then
+            if vainfo 2>/dev/null | grep -q 'iHD'; then
+                echo "    [OK]   iHD VAAPI driver present (vainfo reports it)"
+            else
+                echo "    [INFO] vainfo did not report the iHD driver — run 'vainfo' as a login user to verify"
+                qsv_ok=0
+            fi
+        else
+            echo "    [INFO] vainfo not installed; skipping driver probe"
+        fi
+        if [ "$qsv_ok" = "1" ]; then
+            echo "    Hardware encoding should be available."
+        else
+            echo "    Hardware encoding may not be available — falling back to CPU (libx265)."
+            echo "    To enable Intel QSV on Debian/Ubuntu, install:"
+            echo "      sudo apt install intel-media-va-driver-non-free vainfo"
+            echo "    (non-free-firmware / multiverse repository must be enabled)."
+        fi
+        echo ""
+
+        # 6. Enable + start the service.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable video-hevc-converter.service >/dev/null 2>&1 || true
+            systemctl restart video-hevc-converter.service || true
+
+            echo "==> video-hevc-converter service enabled and started."
+            echo "    Config     : $CONFIG_FILE"
+            echo "    Data dir   : $APP_HOME"
+            echo "    Log dir    : $APP_LOG"
+            echo "    Logs live  : journalctl -u video-hevc-converter -f"
+            echo "    Web UI     : http://<host>:8080"
+        else
+            echo "==> systemd not detected — start manually with:"
+            echo "    /usr/lib/video-hevc-converter/venv/bin/python3 /usr/lib/video-hevc-converter/convert.py"
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

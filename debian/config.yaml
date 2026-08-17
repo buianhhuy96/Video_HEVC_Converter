@@ -1,0 +1,102 @@
+# Video HEVC Converter — native install config.
+# Paths follow the Filesystem Hierarchy Standard for a system-installed daemon.
+# Edit and then run: systemctl restart video-hevc-converter
+
+scan_paths:
+  - /mnt/media/Movies
+  - /mnt/media/TVShows
+
+video_extensions:
+  - .mp4
+  - .mkv
+  - .mov
+  - .avi
+  - .wmv
+  - .flv
+  - .m4v
+  - .ts
+  - .mts
+  - .m2ts
+  - .webm
+  - .mpg
+  - .mpeg
+  - .vob
+  - .3gp
+
+skip_codecs:
+  - hevc
+  - h265
+  - av1
+  - vp9
+
+raw_codecs:
+  - prores
+  - prores_ks
+  - dnxhd
+  - dnxhr
+  - cfhd
+  - v210
+  - v410
+  - r210
+  - r10k
+  - huffyuv
+  - ffv1
+  - utvideo
+  - rawvideo
+  - mjpeg
+  - magicyuv
+  - lagarith
+
+raw_extensions:
+  - .braw
+  - .r3d
+  - .ari
+  - .arriraw
+  - .dng
+  - .crm
+  - .mxf
+
+raw_filename_markers:
+  - "_log"
+  - ".log."
+  - "slog"
+  - "vlog"
+  - "flog"
+  - "hlg-raw"
+  - "prores"
+  - "dnxhr"
+  - "master"
+  - "intermediate"
+
+min_size_bytes: 20971520
+
+encoder:
+  codec: hevc_qsv
+  global_quality: 21
+  preset: veryslow
+  look_ahead: true
+  look_ahead_depth: 40
+  allow_10bit: true
+  max_bitrate_kbps: 0
+  deband: false
+  preserve_color_metadata: true
+
+output:
+  fallback_container: .mkv
+  copy_audio: true
+  copy_subs: true
+
+validation:
+  duration_tolerance_seconds: 1.5
+  full_decode: true
+  check_stream_counts: true
+
+runtime:
+  delete_original: true
+  work_dir: /var/lib/video-hevc-converter/tmp
+  log_file: /var/log/video-hevc-converter/converter.log
+  state_db: /var/lib/video-hevc-converter/state.db
+  dry_run: false
+  stall_timeout_seconds: 300
+  stability_check_seconds: 2.0
+  sweep_at_time: "03:00"

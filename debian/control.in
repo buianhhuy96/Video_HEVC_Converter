@@ -1,0 +1,26 @@
+Package: video-hevc-converter
+Version: @VERSION@
+Section: video
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.10),
+ python3-venv,
+ python3-pip,
+ ffmpeg,
+ adduser,
+ systemd
+Recommends: intel-media-va-driver-non-free,
+ intel-gpu-tools,
+ vainfo
+Maintainer: buianhhuy96 <buianhhuy96@gmail.com>
+Homepage: https://github.com/buianhhuy96/Video_HEVC_Converter
+Description: Video HEVC Converter background service
+ Native systemd service that scans configured folders, transcodes non-HEVC
+ videos to HEVC using Intel QSV (with libx265 fallback), validates the
+ result, and atomically replaces the original. Includes a FastAPI web UI
+ on port 8080 (open by default; set UI_PASSWORD to require HTTP Basic
+ auth).
+ .
+ The service runs as the "video-converter" system user in the render and
+ video groups (for /dev/dri access). Config lives in
+ /var/lib/video-hevc-converter/config.yaml.

@@ -1,0 +1,32 @@
+#!/bin/bash
+# postrm — Video HEVC Converter
+set -e
+
+APP_USER=video-converter
+APP_HOME=/var/lib/video-hevc-converter
+APP_LIB=/usr/lib/video-hevc-converter
+APP_LOG=/var/log/video-hevc-converter
+
+case "$1" in
+    purge)
+        # Wipe runtime state, config, logs, and the venv.
+        rm -rf "$APP_HOME" "$APP_LOG" "$APP_LIB/venv"
+        # Remove the system user if we created it.
+        if getent passwd "$APP_USER" >/dev/null; then
+            deluser --system "$APP_USER" >/dev/null 2>&1 || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Keep runtime state and the venv across upgrades / non-purge removals.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

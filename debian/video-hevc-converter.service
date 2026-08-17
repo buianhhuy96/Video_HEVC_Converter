@@ -1,0 +1,34 @@
+[Unit]
+Description=Video HEVC Converter
+Documentation=https://github.com/buianhhuy96/Video_HEVC_Converter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=video-converter
+Group=video-converter
+SupplementaryGroups=render video
+WorkingDirectory=/usr/lib/video-hevc-converter
+Environment=CONFIG_PATH=/var/lib/video-hevc-converter/config.yaml
+Environment=UI_PORT=8080
+ExecStart=/usr/lib/video-hevc-converter/venv/bin/python3 -u /usr/lib/video-hevc-converter/convert.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/video-hevc-converter /var/log/video-hevc-converter /tmp
+# Media directories are also required — the service mounts nothing itself,
+# but reads/writes files under configured scan_paths. Adjust the systemd
+# override if your scan paths need explicit ReadWritePaths= entries.
+
+[Install]
+WantedBy=multi-user.target

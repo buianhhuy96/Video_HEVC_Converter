@@ -1,0 +1,9 @@
+# Shell scripts and dpkg maintainer scripts must have LF endings.
+*.sh              text eol=lf
+install.sh        text eol=lf
+run.sh            text eol=lf
+build_deb.sh      text eol=lf
+debian/postinst   text eol=lf
+debian/prerm      text eol=lf
+debian/postrm     text eol=lf
+debian/*.service  text eol=lf
