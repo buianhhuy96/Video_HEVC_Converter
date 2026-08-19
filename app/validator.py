@@ -85,15 +85,19 @@ def validate(
         # (uses the iGPU's fixed-function decoder — an order of magnitude
         # faster than software), then fall back to software if QSV isn't
         # usable for this file.
+        # rc alone is trusted; ffmpeg was invoked with `-xerror` so any real
+        # decode error makes it exit non-zero. Stderr may still contain
+        # benign chatter (libva init, VA-API driver info) that must not be
+        # treated as failure.
         base = ["ffmpeg", "-nostdin", "-v", "error", "-xerror"]
         tail = ["-i", str(new_path), "-progress", "pipe:1", "-f", "null", "-"]
         for accel in (["-hwaccel", "qsv"], []):
             cmd = base + accel + tail
             rc, stderr = _run_full_decode(cmd, progress_cb)
-            if rc == 0 and not stderr.strip():
+            if rc == 0:
                 break
-            if accel and rc != 0:
-                log.info("full-decode: QSV path failed, retrying in software")
+            if accel:
+                log.info("full-decode: QSV path failed (rc=%d), retrying in software", rc)
                 continue
             raise ValidationError(
                 f"full-decode failed: rc={rc} stderr={stderr.strip()[:400]}"
