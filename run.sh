@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # run.sh — build (if needed) and start the Video HEVC Converter container.
-# Run from the repo root: bash run.sh [--build] [--logs]
+# Run from the repo root: bash run.sh [--no-build] [--logs]
 #
-#   --build   force a fresh image build even if the image already exists
-#             (needed after Dockerfile changes)
-#   --logs    follow container logs after starting (Ctrl+C to detach; the
-#             container keeps running in the background)
+#   --no-build  skip the image build step (fastest; use only if you know
+#               nothing in app/ or Dockerfile changed since last run)
+#   --logs      follow container logs after starting (Ctrl+C to detach; the
+#               container keeps running in the background)
 
 set -euo pipefail
 
@@ -14,12 +14,15 @@ log()  { printf "%s[+]%s %s\n" "$GREEN"  "$NC" "$*"; }
 warn() { printf "%s[!]%s %s\n" "$YELLOW" "$NC" "$*" >&2; }
 err()  { printf "%s[x]%s %s\n" "$RED"    "$NC" "$*" >&2; }
 
-BUILD=""
+# Default: always rebuild so `git pull; ./run.sh` picks up code changes.
+# Docker's layer cache makes this fast when nothing actually changed.
+BUILD="--build"
 FOLLOW=""
 for arg in "$@"; do
     case "$arg" in
-        --build) BUILD="--build" ;;
-        --logs)  FOLLOW="1" ;;
+        --no-build) BUILD="" ;;
+        --build)    BUILD="--build" ;;  # kept for backward compatibility
+        --logs)     FOLLOW="1" ;;
         -h|--help)
             sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -41,15 +44,11 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 1
 fi
 
-# First run needs --build to compile the image; subsequent runs reuse it
-# unless the user asks for a rebuild.
-if [[ -z "$BUILD" ]] && ! docker image inspect video_hevc_converter-video-converter >/dev/null 2>&1 \
-                    && ! docker image inspect video-hevc-converter-video-converter >/dev/null 2>&1; then
-    log "First run — building image."
-    BUILD="--build"
+if [[ -n "$BUILD" ]]; then
+    log "Building image (cache reused when unchanged) and starting video-converter ..."
+else
+    log "Starting video-converter (skipping image build) ..."
 fi
-
-log "Starting video-converter ..."
 docker compose up -d $BUILD
 
 # Detect the mapped host port from the compose file (defaults to 8080).
