@@ -1600,6 +1600,12 @@ def api_convert_file(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"probe failed: {e}")
 
+    # Manual single-file convert is a "force retry": drop any prior DB record
+    # (e.g. an earlier stop / failure / skip) so the file is re-encoded.
+    cfg = _load()
+    with sqlite3.connect(cfg.runtime.state_db) as c:
+        c.execute("DELETE FROM processed WHERE path=?", (resolved.as_posix(),))
+
     state.append_pending({
         "path": resolved.as_posix(),
         "codec": info.codec,

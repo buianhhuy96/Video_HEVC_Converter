@@ -192,12 +192,21 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
         log.error("VALIDATION-FAIL %s  (%s)", path, e)
         if tmp_out and tmp_out.exists():
             tmp_out.unlink()
-        store.record(path, "failed", reason=f"validate: {e}", orig_codec=info.codec)
+        if state.stop_requested():
+            # Validation was interrupted by user stop; keep for retry.
+            log.info("VALIDATE-CANCELLED %s", path)
+        else:
+            store.record(path, "failed", reason=f"validate: {e}", orig_codec=info.codec)
     except Exception as e:  # noqa: BLE001
-        log.error("ENCODE-FAIL %s  (%s)", path, e)
         if tmp_out and tmp_out.exists():
             tmp_out.unlink(missing_ok=True)
-        store.record(path, "failed", reason=f"encode: {e}", orig_codec=info.codec)
+        if state.stop_requested():
+            # User pressed Stop; leave the entry in pending and skip the DB
+            # failed record so a later Convert click retries cleanly.
+            log.info("ENCODE-CANCELLED %s", path)
+        else:
+            log.error("ENCODE-FAIL %s  (%s)", path, e)
+            store.record(path, "failed", reason=f"encode: {e}", orig_codec=info.codec)
     finally:
         state.clear_current()
 
