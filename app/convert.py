@@ -343,7 +343,7 @@ def main() -> int:
             if delay is not None:
                 action = state.wait_for_action(delay) or "sweep"
             else:
-                action = state.wait_for_action(365 * 24 * 3600) or "wake"
+                action = state.wait_for_action(24 * 3600) or "wake"
 
             if _shutdown:
                 break

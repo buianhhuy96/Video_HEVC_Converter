@@ -66,13 +66,18 @@ def request_wake() -> None:
     _action_q.put("wake")
 
 
+# Windows wait primitives cap at ~49 days worth of milliseconds. Anything
+# larger throws OverflowError. Cap here so the caller never has to worry.
+_MAX_WAIT_SECONDS = 24 * 3600  # 1 day — loop back if the timeout runs out.
+
+
 def wait_for_action(timeout: float) -> str | None:
     """Block until an action arrives or `timeout` seconds pass.
 
     Returns the action name, or None on timeout.
     """
     try:
-        return _action_q.get(timeout=timeout)
+        return _action_q.get(timeout=min(timeout, _MAX_WAIT_SECONDS))
     except queue.Empty:
         return None
 

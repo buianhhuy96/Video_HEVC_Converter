@@ -44,6 +44,14 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 1
 fi
 
+# First-run bootstrap: copy the shipped template into the live config
+# location if it isn't there yet. Live config is git-ignored so pulls
+# never overwrite the user's scan_paths and slider values.
+if [[ ! -f config/config.yaml && -f config/config.yaml.example ]]; then
+    log "Seeding config/config.yaml from the shipped template."
+    cp config/config.yaml.example config/config.yaml
+fi
+
 if [[ -n "$BUILD" ]]; then
     log "Building image (cache reused when unchanged) and starting video-converter ..."
 else

@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 build/
 *.deb
+
+# Live user config \u2014 ignored so `git pull` never wipes scan_paths, sliders,
+# sweep time, etc. Template lives at config/config.yaml.example.
+config/config.yaml
