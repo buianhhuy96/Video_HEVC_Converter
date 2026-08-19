@@ -9,6 +9,7 @@ import html
 import logging
 import math
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -506,6 +507,11 @@ def _render_page(cfg: Config) -> str:
       </div>
 
       <section class='card'>
+        <h2 class='font-semibold mb-3 text-lg'>Intel iGPU</h2>
+        <div id='gpu-status' hx-get='/api/gpu/status' hx-trigger='load, every 2s'>…</div>
+      </section>
+
+      <section class='card'>
         <div id='pies' hx-get='/api/pies' hx-trigger='load, every 5s'>…</div>
       </section>
 
@@ -891,6 +897,102 @@ def _render_recent(cfg: Config) -> str:
     return "<table class='w-full text-sm'>" + "".join(body) + "</table>"
 
 
+# Order determines display; only these engine families are surfaced.
+_GPU_ENGINE_ORDER = ("Video", "VideoEnhance", "Render/3D", "Blitter")
+
+
+def _read_gpu_status() -> dict:
+    if not Path("/dev/dri/renderD128").exists():
+        return {"available": False, "reason": "no /dev/dri/renderD128 device"}
+    if not shutil.which("intel_gpu_top"):
+        return {"available": False, "reason": "intel_gpu_top not installed"}
+    stdout = ""
+    try:
+        # -s 500 = 500ms interval; 1.5s window captures one full sample.
+        proc = subprocess.run(
+            ["intel_gpu_top", "-J", "-s", "500"],
+            capture_output=True, text=True, timeout=1.5,
+        )
+        stdout = proc.stdout or ""
+    except subprocess.TimeoutExpired as e:
+        raw = e.stdout or b""
+        stdout = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"available": False, "reason": f"intel_gpu_top failed: {e}"}
+
+    engines: dict[str, float] = {}
+    for m in re.finditer(r'"([A-Za-z0-9/_]+)":\s*\{\s*"busy":\s*([\d.]+)', stdout):
+        name, busy = m.group(1), float(m.group(2))
+        family = name.split("/", 1)[0]
+        if family in _GPU_ENGINE_ORDER:
+            engines[name] = max(engines.get(name, 0.0), busy)
+
+    freq_actual = None
+    freq_m = re.search(r'"frequency":\s*\{[^}]*?"actual":\s*([\d.]+)', stdout)
+    if freq_m:
+        freq_actual = float(freq_m.group(1))
+
+    power = None
+    pwr_m = re.search(r'"power":\s*\{[^}]*?"GPU":\s*([\d.]+)', stdout)
+    if pwr_m:
+        power = float(pwr_m.group(1))
+
+    if not engines:
+        return {"available": False, "reason": "no sample captured (privileges?)"}
+    return {
+        "available": True,
+        "engines": engines,
+        "frequency_mhz": freq_actual,
+        "power_w": power,
+    }
+
+
+def _render_gpu_status() -> str:
+    s = _read_gpu_status()
+    if not s.get("available"):
+        return (
+            f"<div class='text-sm text-amber-400'>GPU stats unavailable: "
+            f"{_esc(s.get('reason', 'unknown'))}</div>"
+            "<p class='text-xs text-slate-400 mt-2'>"
+            "On the container, <code>intel_gpu_top</code> may need the host "
+            "<code>i915</code> driver and access to <code>/dev/dri</code>."
+            "</p>"
+        )
+    engines = s["engines"]
+    # Order: known families first (highest-signal engines up top), then any others alphabetically.
+    def rank(name: str) -> tuple:
+        family = name.split("/", 1)[0]
+        return (_GPU_ENGINE_ORDER.index(family) if family in _GPU_ENGINE_ORDER else 99, name)
+    ordered = sorted(engines.items(), key=lambda kv: rank(kv[0]))
+
+    def bar(name: str, pct: float) -> str:
+        pct_clamped = max(0.0, min(100.0, pct))
+        color = "bg-emerald-500" if pct_clamped >= 50 else ("bg-sky-500" if pct_clamped >= 10 else "bg-slate-600")
+        return (
+            "<div class='mb-2'>"
+            f"<div class='flex justify-between text-xs mb-1'><span class='font-mono text-slate-300'>{_esc(name)}</span>"
+            f"<span class='font-mono text-slate-400'>{pct_clamped:.1f}%</span></div>"
+            "<div class='h-2 bg-slate-700 rounded'>"
+            f"<div class='h-2 {color} rounded' style='width: {pct_clamped:.1f}%'></div>"
+            "</div>"
+            "</div>"
+        )
+    bars = "".join(bar(n, p) for n, p in ordered)
+
+    meta = []
+    if s.get("frequency_mhz") is not None:
+        meta.append(f"<span class='text-slate-400'>Freq</span> <span class='font-mono'>{s['frequency_mhz']:.0f} MHz</span>")
+    if s.get("power_w") is not None:
+        meta.append(f"<span class='text-slate-400'>Power</span> <span class='font-mono'>{s['power_w']:.1f} W</span>")
+    meta_html = ("<div class='mt-3 flex gap-6 text-sm'>" + " · ".join(meta) + "</div>") if meta else ""
+
+    return bars + meta_html + (
+        "<p class='text-xs text-slate-500 mt-3'>"
+        "<b>Video</b> busy = QSV encode/decode load. If <b>Video</b> is high while CPU is low, hardware acceleration is working."
+        "</p>"
+    )
+
+
 def _render_container() -> str:
     info = _container_info()
     cfg = _load()
@@ -1118,6 +1220,11 @@ def api_container(_: Auth) -> str:
 @app.get("/api/scan_folders", response_class=HTMLResponse)
 def api_scan_folders(_: Auth) -> str:
     return _render_scan_folders()
+
+
+@app.get("/api/gpu/status", response_class=HTMLResponse)
+def api_gpu_status(_: Auth) -> str:
+    return _render_gpu_status()
 
 
 @app.get("/api/recent", response_class=HTMLResponse)
