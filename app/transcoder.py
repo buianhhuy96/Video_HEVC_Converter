@@ -49,6 +49,11 @@ def _pre_filters(cfg: Config) -> str:
     return ",".join(filters)
 
 
+def _needs_bt709_bsf(info: VideoInfo) -> bool:
+    """True when the source has no colour tagging — retag output as BT.709 SDR."""
+    return not (info.color_primaries or info.color_trc or info.color_space)
+
+
 def _stream_map_args(cfg: Config, info: VideoInfo) -> list[str]:
     """Map main video for encoding + cover art / audio / subs / attachments to copy.
 
@@ -82,13 +87,22 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
     else:
         args += ["-sn"]
     if cfg.encoder.preserve_color_metadata:
-        # Fall back to BT.709 SDR defaults when the source has no colour
-        # tagging (common on hardsub'd re-encodes) so browser players don't
-        # guess sRGB gamma and lift the blacks.
-        args += ["-color_primaries", info.color_primaries or "bt709"]
-        args += ["-color_trc", info.color_trc or "bt709"]
-        args += ["-colorspace", info.color_space or "bt709"]
-        args += ["-color_range", info.color_range or "tv"]
+        if info.color_primaries:
+            args += ["-color_primaries", info.color_primaries]
+        if info.color_trc:
+            args += ["-color_trc", info.color_trc]
+        if info.color_space:
+            args += ["-colorspace", info.color_space]
+        if info.color_range:
+            args += ["-color_range", info.color_range]
+    # For untagged sources, retag the HEVC bitstream directly (post-encode) so
+    # players don't guess sRGB gamma. Bitstream filter runs after the encoder,
+    # so it doesn't confuse hevc_qsv's parameter validation.
+    if _needs_bt709_bsf(info):
+        args += ["-bsf:v", "hevc_metadata=colour_primaries=1:"
+                            "transfer_characteristics=1:"
+                            "matrix_coefficients=1:"
+                            "video_full_range_flag=0"]
     args += ["-map_metadata", "0", "-map_chapters", "0"]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
@@ -257,12 +271,17 @@ def _run_ffmpeg(cmd: list[str], cfg: Config) -> int:
             if k == "progress":
                 state.set_progress(progress)
 
+    stderr_tail: list[str] = []
+
     def _read_stderr(stream) -> None:
         for line in stream:
             _touch()
             line = line.rstrip()
             if line:
                 log.debug("ffmpeg | %s", line)
+                stderr_tail.append(line)
+                if len(stderr_tail) > 40:
+                    del stderr_tail[0]
 
     _spawn(proc.stdout, _read_progress)
     _spawn(proc.stderr, _read_stderr)
@@ -304,6 +323,8 @@ def _run_ffmpeg(cmd: list[str], cfg: Config) -> int:
             progress.get("out_time", "?"),
             progress.get("total_size", "?"),
         )
+    if rc != 0 and stderr_tail:
+        log.warning("ffmpeg stderr tail (rc=%d):\n  %s", rc, "\n  ".join(stderr_tail[-15:]))
     return rc
 
 
