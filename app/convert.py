@@ -150,9 +150,10 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
                       duration=info.duration)
     try:
         tmp_out = transcode(info, cfg)
-        state.set_current(stage="validating")
+        state.set_current(stage="validating", progress={})
         validate(info, tmp_out, cfg.validation,
-                 expect_subtitles=cfg.output.copy_subs)
+                 expect_subtitles=cfg.output.copy_subs,
+                 progress_cb=state.set_progress)
 
         new_size = tmp_out.stat().st_size
 

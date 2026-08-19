@@ -36,6 +36,7 @@ _security = HTTPBasic(auto_error=False)
 _config_path: str = "/config/config.yaml"
 
 PRESETS = ["veryfast", "fast", "medium", "slow", "slower", "veryslow"]
+SHARPEN_NAMES = ["Off", "Very light", "Light", "Moderate", "Strong", "Very strong"]
 
 _COMPOSE_PATH = "/compose/docker-compose.yml"
 _COMPOSE_SERVICE = "video-converter"
@@ -358,6 +359,10 @@ def _render_page(cfg: Config) -> str:
       <h1 class='text-2xl font-bold'>Video HEVC Converter</h1>
     </header>
 
+    <div id='activity'
+         hx-get='/api/activity' hx-trigger='load, every 2s'
+         hx-swap='innerHTML'></div>
+
     <nav class='tabs-nav flex gap-1 border-b border-slate-700 mb-6'>
       <button data-tab='setup'   class='tab tab-active'>Setup</button>
       <button data-tab='convert' class='tab'>Convert</button>
@@ -366,15 +371,15 @@ def _render_page(cfg: Config) -> str:
 
     <!-- ==================== TAB 1: SETUP ==================== -->
     <section id='tab-setup' class='tab-content space-y-6'>
-      <div class='flex items-center gap-3'>
+      <div class='flex items-center gap-3 flex-wrap'>
         <button class='btn btn-primary' hx-post='/api/scan' hx-swap='none'>Scan now</button>
+        <button type='button' class='btn btn-ghost'
+                onclick='vhcOpenFileBrowser()'>Convert one file…</button>
         <span class='text-slate-400 text-sm'>
-          Populates the Pending list below without starting any encoding.
+          Scan populates the Pending list. "Convert one file…" queues a single
+          file and starts encoding immediately — useful for testing settings.
         </span>
       </div>
-      <div id='scan-progress'
-           hx-get='/api/scan/progress' hx-trigger='load, every 2s'
-           hx-swap='innerHTML'></div>
 
       <section class='card'>
         <div id='scan-folders' hx-get='/api/scan_folders' hx-trigger='load'>…</div>
@@ -417,9 +422,29 @@ def _render_page(cfg: Config) -> str:
                 <span>{PRESETS[-1]}</span>
               </div>
             </div>
+            <div>
+              <div class='flex items-baseline justify-between mb-1'>
+                <label class='text-sm'>Sharpen <span class='text-slate-400'>(compensate encoder smoothing)</span></label>
+                <span id='vhc-sharpen-val' class='font-mono text-slate-100 text-sm'>{SHARPEN_NAMES[e.sharpen]}</span>
+              </div>
+              <input type='range' min='0' max='{len(SHARPEN_NAMES) - 1}' step='1'
+                     value='{e.sharpen}' class='vhc-slider'
+                     oninput='vhcSharpenUpdate(this)'>
+              <input type='hidden' name='sharpen' id='vhc-sharpen-hidden' value='{e.sharpen}'>
+              <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
+                <span>{SHARPEN_NAMES[0]}</span>
+                <span>{SHARPEN_NAMES[-1]}</span>
+              </div>
+              <p class='text-[11px] text-slate-500 mt-1'>
+                Adds an <code>unsharp</code> pass before encoding. Recovers
+                apparent detail lost to QSV smoothing; too much causes edge
+                halos. QSV full-HW mode is disabled while sharpening is on.
+              </p>
+            </div>
             <script>
               (function() {{
                 const PRESET_NAMES = {PRESETS!r};
+                const SHARPEN_NAMES = {SHARPEN_NAMES!r};
                 window.vhcPresetUpdate = function(el) {{
                   const name = PRESET_NAMES[parseInt(el.value)];
                   document.getElementById('vhc-preset-val').textContent = name;
@@ -430,6 +455,11 @@ def _render_page(cfg: Config) -> str:
                   const crf = Math.round(30 - pct * 12 / 100);
                   document.getElementById('vhc-quality-val').textContent = 'CRF ' + crf;
                   document.getElementById('vhc-quality-crf').value = crf;
+                }};
+                window.vhcSharpenUpdate = function(el) {{
+                  const idx = parseInt(el.value);
+                  document.getElementById('vhc-sharpen-val').textContent = SHARPEN_NAMES[idx];
+                  document.getElementById('vhc-sharpen-hidden').value = idx;
                 }};
               }})();
             </script>
@@ -544,6 +574,7 @@ def _render_page(cfg: Config) -> str:
       }}
     }})();
   </script>
+  {_BROWSER_MODAL_HTML}
 </body>
 </html>"""
 
@@ -707,6 +738,78 @@ def _render_scan_progress() -> str:
     return ""
 
 
+def _render_activity() -> str:
+    """Global activity strip shown above the tab nav.
+
+    Collapses to nothing when idle; shows either scan or encode progress
+    otherwise. Scan takes precedence when both would appear.
+    """
+    scan = state.get_scan_stats()
+    cur = state.get_current()
+    scanning = scan.get("phase") in ("enumerating", "probing")
+    active = cur.get("stage", "idle") != "idle" and cur.get("path")
+
+    if not scanning and not active:
+        return ""
+    body = _activity_scan_body(scan) if scanning else _activity_encode_body(cur)
+    return (
+        "<section class='card mb-6 !p-4 border border-emerald-500/30 bg-slate-800/80'>"
+        f"{body}"
+        "</section>"
+    )
+
+
+def _activity_scan_body(s: dict) -> str:
+    phase = s.get("phase", "idle")
+    if phase == "enumerating":
+        return (
+            "<div class='flex items-center gap-3 text-sm'>"
+            "<span class='badge b-skip'>SCANNING</span>"
+            "<span class='text-slate-300'>Enumerating files\u2026</span>"
+            "</div>"
+        )
+    total = int(s.get("files_examined") or 0)
+    done = int(s.get("files_probed") or 0)
+    pct = (done / total * 100.0) if total > 0 else 0.0
+    return (
+        "<div class='flex items-center gap-3 text-sm mb-2'>"
+        "<span class='badge b-skip'>SCANNING</span>"
+        f"<span class='text-slate-300'>Probing <b class='text-slate-100'>{done}</b> / {total} files</span>"
+        f"<span class='text-slate-100 font-semibold ml-auto'>{pct:.1f}%</span>"
+        "</div>"
+        "<div class='progress-track'>"
+        f"<div class='progress-fill' style='width:{pct:.2f}%'></div>"
+        "</div>"
+    )
+
+
+def _activity_encode_body(cur: dict) -> str:
+    p = cur.get("progress") or {}
+    duration = float(cur.get("duration") or 0)
+    out_time_s = _parse_ffmpeg_time(p.get("out_time"))
+    pct = 0.0
+    if duration > 0 and out_time_s is not None:
+        pct = min(100.0, max(0.0, out_time_s / duration * 100))
+    stage_upper = str(cur.get("stage", "idle")).upper()
+    stage_badge = {
+        "PROBING": "b-skip", "ENCODING": "b-ok",
+        "VALIDATING": "b-skip", "REPLACING": "b-skip",
+    }.get(stage_upper, "b-skip")
+    filename = Path(str(cur.get("path", ""))).name
+    speed = _esc(p.get("speed") or "\u2014")
+    return (
+        "<div class='flex items-center gap-3 text-sm mb-2 flex-wrap'>"
+        f"<span class='badge {stage_badge}'>{_esc(stage_upper)}</span>"
+        f"<span class='text-slate-300 font-mono truncate max-w-md'>{_esc(filename)}</span>"
+        f"<span class='text-slate-400 ml-auto'>speed <b class='text-slate-100'>{speed}</b> \u00b7 "
+        f"<b class='text-slate-100'>{pct:.1f}%</b></span>"
+        "</div>"
+        "<div class='progress-track'>"
+        f"<div class='progress-fill' style='width:{pct:.2f}%'></div>"
+        "</div>"
+    )
+
+
 def _render_progress() -> str:
     """Tab 2 body: current file being encoded + list of files still waiting."""
     cur = state.get_current()
@@ -755,6 +858,20 @@ def _render_progress() -> str:
             "PROBING": "b-skip", "ENCODING": "b-ok",
             "VALIDATING": "b-skip", "REPLACING": "b-skip",
         }.get(stage_upper, "b-skip")
+        stage_hint = ""
+        if cur["stage"] == "validating":
+            stage_hint = (
+                "<p class='text-xs text-amber-400'>"
+                "Full-decoding the output to catch corruption. Uses the iGPU "
+                "when possible — expect a minute or two on large 4K files."
+                "</p>"
+            )
+        elif cur["stage"] == "replacing":
+            stage_hint = (
+                "<p class='text-xs text-slate-400'>"
+                "Copying to the source location and swapping in atomically."
+                "</p>"
+            )
 
         current_block = f"""
         <div class='space-y-4'>
@@ -768,6 +885,7 @@ def _render_progress() -> str:
           </div>
 
           <div class='font-mono text-sm text-cyan-300 break-all'>{_esc(current_path)}</div>
+          {stage_hint}
 
           <div>
             <div class='flex justify-between text-xs text-slate-400 mb-1'>
@@ -1059,7 +1177,6 @@ def _render_scan_folders() -> str:
             <span id='vhc-scan-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
           </div>
         </form>
-        {_BROWSER_MODAL_HTML}
         <script>
           function vhcMarkScanDirty() {{
             const btn = document.getElementById('vhc-scan-save');
@@ -1107,7 +1224,7 @@ _BROWSER_MODAL_HTML = r"""
 <div id='vhc-browse-modal' class='hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70'>
   <div class='bg-slate-800 rounded-lg shadow-xl w-full max-w-lg mx-4 p-4'>
     <div class='flex items-center justify-between mb-3'>
-      <h3 class='text-lg font-semibold'>Choose a folder</h3>
+      <h3 id='vhc-browse-title' class='text-lg font-semibold'>Choose a folder</h3>
       <button type='button' onclick='vhcCloseBrowser()' class='text-slate-400 hover:text-slate-200 text-xl leading-none'>&times;</button>
     </div>
     <div class='mb-2 flex items-center gap-2'>
@@ -1117,7 +1234,7 @@ _BROWSER_MODAL_HTML = r"""
     <div id='vhc-browse-list' class='max-h-72 overflow-y-auto border border-slate-700 rounded p-1 mb-3 bg-slate-900'>
       <div class='text-slate-500 text-xs p-2'>Loading…</div>
     </div>
-    <div class='flex justify-end gap-2'>
+    <div id='vhc-browse-footer' class='flex justify-end gap-2'>
       <button type='button' onclick='vhcCloseBrowser()' class='btn btn-ghost text-xs'>Cancel</button>
       <button id='vhc-browse-select' type='button' onclick='vhcBrowseSelect()' class='btn btn-primary text-xs'>Select this folder</button>
     </div>
@@ -1127,11 +1244,23 @@ _BROWSER_MODAL_HTML = r"""
   let vhcBrowseTarget = null;
   let vhcBrowseCurrent = null;
   let vhcBrowseParent = null;
+  let vhcBrowseMode = 'folder';   // 'folder' | 'file'
   function vhcOpenBrowser(btn) {
+    vhcBrowseMode = 'folder';
     vhcBrowseTarget = (btn && btn.parentElement) ? btn.parentElement.querySelector("input[name='path']") : null;
     const start = (vhcBrowseTarget && vhcBrowseTarget.value.trim()) || '';
+    document.getElementById('vhc-browse-title').textContent = 'Choose a folder';
+    document.getElementById('vhc-browse-select').classList.remove('hidden');
     document.getElementById('vhc-browse-modal').classList.remove('hidden');
     vhcBrowseLoad(start);
+  }
+  function vhcOpenFileBrowser() {
+    vhcBrowseMode = 'file';
+    vhcBrowseTarget = null;
+    document.getElementById('vhc-browse-title').textContent = 'Choose a file to convert';
+    document.getElementById('vhc-browse-select').classList.add('hidden');
+    document.getElementById('vhc-browse-modal').classList.remove('hidden');
+    vhcBrowseLoad('');
   }
   function vhcCloseBrowser() {
     document.getElementById('vhc-browse-modal').classList.add('hidden');
@@ -1149,11 +1278,38 @@ _BROWSER_MODAL_HTML = r"""
     }
     vhcCloseBrowser();
   }
+  function vhcHumanBytes(n) {
+    if (!n) return '';
+    const u = ['B','KiB','MiB','GiB','TiB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + u[i];
+  }
+  async function vhcConvertFile(path) {
+    try {
+      const body = 'path=' + encodeURIComponent(path);
+      const r = await fetch('/api/convert_file', {
+        method: 'POST', body,
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        alert('Queue failed: ' + (err || ('HTTP ' + r.status)));
+        return;
+      }
+      vhcCloseBrowser();
+    } catch (e) {
+      alert('Queue failed: ' + e);
+    }
+  }
   async function vhcBrowseLoad(path) {
     const list = document.getElementById('vhc-browse-list');
     list.innerHTML = "<div class='text-slate-500 text-xs p-2'>Loading…</div>";
     try {
-      const url = '/api/browse' + (path ? ('?path=' + encodeURIComponent(path)) : '');
+      const params = new URLSearchParams();
+      if (path) params.set('path', path);
+      if (vhcBrowseMode === 'file') params.set('files', '1');
+      const url = '/api/browse' + (params.toString() ? ('?' + params.toString()) : '');
       const r = await fetch(url);
       if (!r.ok) {
         const err = await r.text();
@@ -1167,16 +1323,28 @@ _BROWSER_MODAL_HTML = r"""
       document.getElementById('vhc-browse-up').disabled = !data.parent;
       document.getElementById('vhc-browse-up').classList.toggle('opacity-40', !data.parent);
       if (!data.entries.length) {
-        list.innerHTML = "<div class='text-slate-500 text-xs p-2'>(no subfolders)</div>";
+        list.innerHTML = vhcBrowseMode === 'file'
+          ? "<div class='text-slate-500 text-xs p-2'>(no video files or subfolders)</div>"
+          : "<div class='text-slate-500 text-xs p-2'>(no subfolders)</div>";
       } else {
         list.innerHTML = '';
         for (const e of data.entries) {
           const b = document.createElement('button');
           b.type = 'button';
           b.className = 'block w-full text-left px-2 py-1 text-sm font-mono hover:bg-slate-800 rounded';
-          b.textContent = '📁 ' + e.name;
+          const isFile = e.type === 'file';
+          const icon = isFile ? '🎬' : '📁';
+          const suffix = isFile && e.size ? "  <span class='text-slate-500 text-xs'>" + vhcHumanBytes(e.size) + "</span>" : '';
+          b.innerHTML = icon + ' ' + e.name.replace(/</g, '&lt;').replace(/>/g, '&gt;') + suffix;
           b.dataset.path = e.path;
-          b.addEventListener('click', () => vhcBrowseLoad(b.dataset.path));
+          b.dataset.type = e.type || 'dir';
+          b.addEventListener('click', () => {
+            if (b.dataset.type === 'file') {
+              vhcConvertFile(b.dataset.path);
+            } else {
+              vhcBrowseLoad(b.dataset.path);
+            }
+          });
           list.appendChild(b);
         }
       }
@@ -1251,6 +1419,11 @@ def api_scan_progress(_: Auth) -> str:
     return _render_scan_progress()
 
 
+@app.get("/api/activity", response_class=HTMLResponse)
+def api_activity(_: Auth) -> str:
+    return _render_activity()
+
+
 @app.post("/api/convert")
 def api_convert(_: Auth) -> JSONResponse:
     n = state.pending_count()
@@ -1274,6 +1447,7 @@ def api_settings(
     _: Auth,
     global_quality: Annotated[int, Form()] = 21,
     preset: Annotated[str, Form()] = "veryslow",
+    sharpen: Annotated[int, Form()] = 0,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1282,6 +1456,8 @@ def api_settings(
         raise HTTPException(400, "global_quality must be 18-30")
     if preset not in PRESETS:
         raise HTTPException(400, f"preset must be one of {PRESETS}")
+    if not 0 <= sharpen < len(SHARPEN_NAMES):
+        raise HTTPException(400, f"sharpen must be 0..{len(SHARPEN_NAMES) - 1}")
     sweep_at_time = sweep_at_time.strip()
     if sweep_at_time:
         try:
@@ -1294,6 +1470,7 @@ def api_settings(
     cfg = _load()
     cfg.encoder.global_quality = global_quality
     cfg.encoder.preset = preset
+    cfg.encoder.sharpen = sharpen
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
@@ -1358,7 +1535,7 @@ def api_scan_paths_save(
 
 
 @app.get("/api/browse")
-def api_browse(_: Auth, path: str = "") -> JSONResponse:
+def api_browse(_: Auth, path: str = "", files: int = 0) -> JSONResponse:
     root = Path(_BROWSE_ROOT).resolve()
     if not path:
         target = root
@@ -1372,21 +1549,69 @@ def api_browse(_: Auth, path: str = "") -> JSONResponse:
     if not target.is_dir():
         raise HTTPException(404, f"not a directory: {target}")
 
+    cfg = _load()
+    video_exts = {e.lower() for e in (cfg.video_extensions or set())}
+    entries: list[dict] = []
     try:
-        children = [
-            c for c in target.iterdir()
-            if c.is_dir() and not c.name.startswith(".")
-        ]
+        for c in target.iterdir():
+            if c.name.startswith("."):
+                continue
+            if c.is_dir():
+                entries.append({"name": c.name, "path": c.as_posix(), "type": "dir"})
+            elif files and c.is_file() and c.suffix.lower() in video_exts:
+                try:
+                    size = c.stat().st_size
+                except OSError:
+                    size = 0
+                entries.append({
+                    "name": c.name, "path": c.as_posix(),
+                    "type": "file", "size": size,
+                })
     except OSError as e:
         raise HTTPException(500, f"cannot list: {e}")
-    children.sort(key=lambda c: c.name.lower())
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
 
     return JSONResponse({
         "path": target.as_posix(),
         "parent": target.parent.as_posix() if target != root else None,
         "root": root.as_posix(),
-        "entries": [{"name": c.name, "path": c.as_posix()} for c in children],
+        "entries": entries,
     })
+
+
+@app.post("/api/convert_file")
+def api_convert_file(
+    _: Auth,
+    path: Annotated[str, Form()],
+) -> JSONResponse:
+    root = Path(_BROWSE_ROOT).resolve()
+    try:
+        resolved = Path(path).resolve()
+    except OSError as e:
+        raise HTTPException(400, f"invalid path: {e}")
+    if resolved != root and root not in resolved.parents:
+        raise HTTPException(400, f"path must be under {_BROWSE_ROOT}")
+    if not resolved.is_file():
+        raise HTTPException(404, f"not a file: {path}")
+
+    try:
+        from probe import probe_video  # local import: avoids ffprobe on module load
+        info = probe_video(resolved)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"probe failed: {e}")
+
+    state.append_pending({
+        "path": resolved.as_posix(),
+        "codec": info.codec,
+        "width": info.width,
+        "height": info.height,
+        "duration": info.duration,
+        "size": resolved.stat().st_size,
+        "bit_depth": info.bit_depth,
+    })
+    state.request_convert_now()
+    log.info("convert_file: queued %s", resolved)
+    return JSONResponse({"ok": True, "queued": resolved.as_posix()})
 
 
 def _spawn_compose_recreate() -> None:

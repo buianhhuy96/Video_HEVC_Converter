@@ -164,6 +164,15 @@ def set_pending(items: list[dict]) -> None:
         _pending.extend(items)
 
 
+def append_pending(item: dict) -> None:
+    """Add a single item to the pending queue if the path isn't already there."""
+    p = item.get("path")
+    with _pending_lock:
+        if any(x.get("path") == p for x in _pending):
+            return
+        _pending.append(item)
+
+
 def get_pending() -> list[dict]:
     with _pending_lock:
         return [dict(x) for x in _pending]

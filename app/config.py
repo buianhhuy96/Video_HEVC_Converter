@@ -27,6 +27,9 @@ class EncoderCfg:
     max_bitrate_kbps: int = 0
     deband: bool = False
     preserve_color_metadata: bool = True
+    # 0 = off; 1..5 map to increasing unsharp-mask strength. Recovers
+    # micro-contrast lost to QSV's smoothing at higher CRF values.
+    sharpen: int = 0
 
 
 @dataclass

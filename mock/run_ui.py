@@ -274,7 +274,23 @@ def _fake_encoder() -> None:
             if aborted:
                 state.clear_current(); stopped = True; break
 
-            state.set_current(stage="validating"); time.sleep(2)
+            # Validation: quick simulated decode with live out_time so the
+            # progress bar animates too.
+            state.set_current(stage="validating", progress={})
+            val_ticks = 6
+            for i in range(val_ticks):
+                if state.stop_requested():
+                    aborted = True; break
+                t = duration_s * (i + 1) / val_ticks
+                h, m, s = int(t // 3600), int(t % 3600 // 60), t % 60
+                state.set_progress({
+                    "speed": f"{random.uniform(8.0, 14.0):.2f}x",
+                    "out_time": f"{h:02d}:{m:02d}:{s:06.3f}",
+                    "progress": "continue",
+                })
+                time.sleep(0.5)
+            if aborted:
+                state.clear_current(); stopped = True; break
             state.set_current(stage="replacing");  time.sleep(1)
 
             orig = int(item.get("size") or 4_000_000_000)

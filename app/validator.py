@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from pathlib import Path
+from typing import Callable
 
 from config import ValidationCfg
 from probe import VideoInfo, probe_video
@@ -21,6 +23,7 @@ def validate(
     cfg: ValidationCfg,
     *,
     expect_subtitles: bool = True,
+    progress_cb: Callable[[dict[str, str]], None] | None = None,
 ) -> None:
     """Raises ValidationError if the new file is bad."""
     if not new_path.exists() or new_path.stat().st_size == 0:
@@ -78,15 +81,56 @@ def validate(
             )
 
     if cfg.full_decode:
-        # Decode every frame to /dev/null. Any decode error → non-zero exit.
-        cmd = [
-            "ffmpeg", "-v", "error",
-            "-xerror",
-            "-i", str(new_path),
-            "-f", "null", "-",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0 or res.stderr.strip():
+        # Full decode: every packet must decode without error. Try QSV first
+        # (uses the iGPU's fixed-function decoder — an order of magnitude
+        # faster than software), then fall back to software if QSV isn't
+        # usable for this file.
+        base = ["ffmpeg", "-nostdin", "-v", "error", "-xerror"]
+        tail = ["-i", str(new_path), "-progress", "pipe:1", "-f", "null", "-"]
+        for accel in (["-hwaccel", "qsv"], []):
+            cmd = base + accel + tail
+            rc, stderr = _run_full_decode(cmd, progress_cb)
+            if rc == 0 and not stderr.strip():
+                break
+            if accel and rc != 0:
+                log.info("full-decode: QSV path failed, retrying in software")
+                continue
             raise ValidationError(
-                f"full-decode failed: rc={res.returncode} stderr={res.stderr.strip()[:400]}"
+                f"full-decode failed: rc={rc} stderr={stderr.strip()[:400]}"
             )
+
+
+def _run_full_decode(
+    cmd: list[str],
+    progress_cb: Callable[[dict[str, str]], None] | None,
+) -> tuple[int, str]:
+    """Run ffmpeg with -progress pipe:1 and push each sample to progress_cb."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_lines.append(line)
+
+    t = threading.Thread(target=_drain_stderr, daemon=True)
+    t.start()
+
+    progress: dict[str, str] = {}
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.strip()
+        if "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        progress[k] = v
+        if k == "progress" and progress_cb is not None:
+            try:
+                progress_cb(dict(progress))
+            except Exception:  # noqa: BLE001
+                log.exception("validation progress_cb raised")
+    proc.wait()
+    t.join(timeout=1)
+    return proc.returncode, "".join(stderr_lines)

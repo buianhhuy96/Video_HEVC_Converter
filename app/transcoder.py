@@ -34,11 +34,18 @@ def _choose_container(src: Path, cfg: Config) -> str:
     return ext if ext in HEVC_SAFE_CONTAINERS else cfg.output.fallback_container
 
 
+# Level → unsharp `luma_amount`. Chroma left at 0 to avoid colour fringing.
+_SHARPEN_STRENGTHS = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6}
+
+
 def _pre_filters(cfg: Config) -> str:
     """Software-domain filter chain applied before the encoder."""
     filters = []
     if cfg.encoder.deband:
         filters.append("gradfun=1.5:8")
+    amt = _SHARPEN_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
+    if amt is not None:
+        filters.append(f"unsharp=5:5:{amt:.2f}:5:5:0.0")
     return ",".join(filters)
 
 
@@ -75,14 +82,13 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
     else:
         args += ["-sn"]
     if cfg.encoder.preserve_color_metadata:
-        if info.color_primaries:
-            args += ["-color_primaries", info.color_primaries]
-        if info.color_trc:
-            args += ["-color_trc", info.color_trc]
-        if info.color_space:
-            args += ["-colorspace", info.color_space]
-        if info.color_range:
-            args += ["-color_range", info.color_range]
+        # Fall back to BT.709 SDR defaults when the source has no colour
+        # tagging (common on hardsub'd re-encodes) so browser players don't
+        # guess sRGB gamma and lift the blacks.
+        args += ["-color_primaries", info.color_primaries or "bt709"]
+        args += ["-color_trc", info.color_trc or "bt709"]
+        args += ["-colorspace", info.color_space or "bt709"]
+        args += ["-color_range", info.color_range or "tv"]
     args += ["-map_metadata", "0", "-map_chapters", "0"]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
@@ -191,8 +197,8 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
 
     attempts: list[tuple[str, list[str]]] = []
     if cfg.encoder.codec == "hevc_qsv" and has_qsv_device():
-        # Deband runs in software, so skip full-HW (no QSV-native deband filter).
-        if not cfg.encoder.deband:
+        # Deband and sharpen run in software, so skip full-HW when either is on.
+        if not cfg.encoder.deband and not cfg.encoder.sharpen:
             attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
         attempts.append(("QSV encode-only", _build_qsv_cmd(src, dst, info, cfg, hw_decode=False)))
     attempts.append(("libx265", _build_x265_cmd(src, dst, info, cfg)))
