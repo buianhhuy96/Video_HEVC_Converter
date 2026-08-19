@@ -225,9 +225,14 @@ def _fake_encoder() -> None:
                 break
             if action == "scan":
                 state.scan_started()
-                time.sleep(2)
+                time.sleep(1.2)  # enumeration phase (indeterminate)
+                total = random.randint(120, 180)
+                state.scan_probing(total)
+                for _ in range(total):
+                    time.sleep(0.05)  # ~50 ms per "probe" so the bar visibly fills
+                    state.scan_probe_tick()
                 state.set_pending(_sample_pending())
-                state.scan_ended(random.randint(40, 60))
+                state.scan_ended(total)
 
         items = state.get_pending()
         if not items:

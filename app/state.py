@@ -33,7 +33,9 @@ _current: dict[str, Any] = {
 _scan: dict[str, Any] = {
     "last_start": None,
     "last_end": None,
-    "files_examined": 0,
+    "files_examined": 0,   # total candidates found by the walk
+    "files_probed": 0,     # how many of those we've already classified
+    "phase": "idle",        # idle | enumerating | probing
     "scanning": False,
 }
 
@@ -117,16 +119,34 @@ def set_progress(progress: dict[str, str]) -> None:
 # Scan stats
 # ---------------------------------------------------------------------------
 def scan_started() -> None:
+    """Enter the enumeration phase — walking the tree, no total yet."""
     with _lock:
         _scan["last_start"] = time.time()
         _scan["files_examined"] = 0
+        _scan["files_probed"] = 0
+        _scan["phase"] = "enumerating"
         _scan["scanning"] = True
+
+
+def scan_probing(total: int) -> None:
+    """Enumeration done; now probing `total` candidates one by one."""
+    with _lock:
+        _scan["files_examined"] = total
+        _scan["files_probed"] = 0
+        _scan["phase"] = "probing"
+
+
+def scan_probe_tick() -> None:
+    with _lock:
+        _scan["files_probed"] += 1
 
 
 def scan_ended(files_examined: int) -> None:
     with _lock:
         _scan["last_end"] = time.time()
         _scan["files_examined"] = files_examined
+        _scan["files_probed"] = files_examined
+        _scan["phase"] = "idle"
         _scan["scanning"] = False
 
 

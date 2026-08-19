@@ -4,8 +4,8 @@
 
 # Directories inside the container to scan (map real paths in docker-compose.yml)
 scan_paths:
-  - /media/volume2/Movies
-  - /media/volume2/TVShows
+  - /media/volume2/Data/Cinema/Movies
+  - /media/volume2/Data/Cinema/TVShows
 
 # File extensions considered "video". Anything else is ignored outright.
 video_extensions:

@@ -204,6 +204,8 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
 def discover(cfg: Config, store: Store) -> int:
     """Walk scan_paths, populate state.pending with files needing conversion.
 
+    Two-pass so the UI can render a real progress bar: enumerate all
+    candidates fast, then probe them one by one (the expensive step).
     Returns the number of files examined (not the pending count).
     """
     log.info("discover starting — paths: %s", cfg.scan_paths)
@@ -212,9 +214,18 @@ def discover(cfg: Config, store: Store) -> int:
     pending: list[dict] = []
     n = 0
     try:
+        candidates: list[Path] = []
         for path in _iter_videos(cfg):
             if _shutdown:
                 break
+            candidates.append(path)
+        state.scan_probing(len(candidates))
+        log.info("discover: enumerated %d candidate(s); probing", len(candidates))
+
+        for path in candidates:
+            if _shutdown:
+                break
+            state.scan_probe_tick()
             n += 1
             info = _classify(path, cfg, store)
             if info is None:

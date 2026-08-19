@@ -371,16 +371,17 @@ def _render_page(cfg: Config) -> str:
           Populates the Pending list below without starting any encoding.
         </span>
       </div>
+      <div id='scan-progress'
+           hx-get='/api/scan/progress' hx-trigger='load, every 2s'
+           hx-swap='innerHTML'></div>
 
       <section class='card'>
-        <h2 class='font-semibold text-lg mb-1'>Container</h2>
-        <p class='text-xs text-slate-400 mb-4 max-w-2xl'>
-          Runtime settings from <code>docker-compose.yml</code> (read-only). The
-          <strong>Scan folders</strong> section below picks which subfolders of
-          the mounted volumes the app scans; changes apply immediately with no
-          restart.
-        </p>
-        <div id='container-info' hx-get='/api/container' hx-trigger='load'>…</div>
+        <div id='scan-folders' hx-get='/api/scan_folders' hx-trigger='load'>…</div>
+      </section>
+
+      <section class='card'>
+        <h2 class='font-semibold mb-3 text-lg'>Pending conversion</h2>
+        <div id='pending' hx-get='/api/pending' hx-trigger='load, every 5s'>…</div>
       </section>
 
       <div class='grid md:grid-cols-1 gap-6'>
@@ -463,8 +464,11 @@ def _render_page(cfg: Config) -> str:
       </div>
 
       <section class='card'>
-        <h2 class='font-semibold mb-3 text-lg'>Pending conversion</h2>
-        <div id='pending' hx-get='/api/pending' hx-trigger='load, every 5s'>…</div>
+        <h2 class='font-semibold text-lg mb-1'>Container</h2>
+        <p class='text-xs text-slate-400 mb-4 max-w-2xl'>
+          Runtime settings from <code>docker-compose.yml</code> (read-only).
+        </p>
+        <div id='container-info' hx-get='/api/container' hx-trigger='load'>…</div>
       </section>
     </section>
 
@@ -666,6 +670,35 @@ def _render_pending_table(items: list[dict], empty_msg: str) -> str:
         footer = (f"<div class='text-xs text-slate-400 mt-2'>"
                   f"+ {len(items) - 100} more not shown\u2026</div>")
     return f"{header}<table class='w-full text-sm'>{thead}<tbody>{''.join(rows)}</tbody></table>{footer}"
+
+
+def _render_scan_progress() -> str:
+    s = state.get_scan_stats()
+    phase = s.get("phase", "idle")
+    if phase == "enumerating":
+        return (
+            "<div class='mt-2 flex items-center gap-3 text-sm'>"
+            "<span class='badge b-skip'>SCANNING</span>"
+            "<span class='text-slate-300'>Enumerating files\u2026</span>"
+            "</div>"
+        )
+    if phase == "probing":
+        total = int(s.get("files_examined") or 0)
+        done = int(s.get("files_probed") or 0)
+        pct = (done / total * 100.0) if total > 0 else 0.0
+        return (
+            "<div class='mt-2 space-y-1'>"
+            "<div class='flex items-center gap-3 text-sm'>"
+            "<span class='badge b-skip'>SCANNING</span>"
+            f"<span class='text-slate-300'>Probing <b class='text-slate-100'>{done}</b> / {total} files</span>"
+            f"<span class='text-slate-100 font-semibold ml-auto'>{pct:.1f}%</span>"
+            "</div>"
+            "<div class='progress-track'>"
+            f"<div class='progress-fill' style='width:{pct:.2f}%'></div>"
+            "</div>"
+            "</div>"
+        )
+    return ""
 
 
 def _render_progress() -> str:
@@ -896,32 +929,34 @@ def _render_container() -> str:
         )
     volumes_html = row("Mounted volumes", mount_html)
 
-    # Scan folders: subset of the mounted volumes that the app actively scans.
-    # Editable via UI (writes config.yaml + triggers a rescan — no restart).
+    return readonly_rows + volumes_html
+
+
+def _render_scan_folders() -> str:
+    cfg = _load()
     rows_html = "".join(_scan_row_html(p) for p in cfg.scan_paths)
-    scan_form = f"""
-        <div class='mt-4 pt-4 border-t border-slate-700'>
-          <div class='flex items-center justify-between mb-2'>
-            <h3 class='text-sm font-semibold uppercase tracking-wide text-slate-300'>Scan folders</h3>
-            <button type='button' onclick='vhcOpenBrowser(null)' class='btn btn-ghost text-xs'>+ Add folder…</button>
-          </div>
-          <p class='text-xs text-slate-400 mb-3'>
-            Folders under <code class='font-mono'>{_esc(_BROWSE_ROOT)}/</code>
-            that the app scans for videos. Changes take effect on the next
-            scan — no restart required.
-          </p>
-          <form id='vhc-scan-form'
-                hx-post='/api/scan_paths/save' hx-swap='none'
-                oninput='vhcMarkScanDirty()'>
-            <div id='scan-rows' class='space-y-2'>{rows_html}</div>
-            <div class='mt-4'>
-              <button id='vhc-scan-save' class='btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600' disabled>
-                Save
-              </button>
-              <span id='vhc-scan-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
-            </div>
-          </form>
+    return f"""
+        <div class='flex items-center justify-between mb-2'>
+          <h3 class='text-sm font-semibold uppercase tracking-wide text-slate-300'>Scan folders</h3>
+          <button type='button' onclick='vhcOpenBrowser(null)' class='btn btn-ghost text-xs'>+ Add folder…</button>
         </div>
+        <p class='text-xs text-slate-400 mb-3'>
+          Folders under <code class='font-mono'>{_esc(_BROWSE_ROOT)}/</code>
+          that the app scans for videos. Changes take effect on the next
+          scan — no restart required.
+        </p>
+        <form id='vhc-scan-form'
+              hx-post='/api/scan_paths/save' hx-swap='none'
+              hx-on::after-request="if(event.detail.successful) htmx.ajax('GET', '/api/scan_folders', '#scan-folders')"
+              oninput='vhcMarkScanDirty()'>
+          <div id='scan-rows' class='space-y-2'>{rows_html}</div>
+          <div class='mt-4'>
+            <button id='vhc-scan-save' class='btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600' disabled>
+              Save
+            </button>
+            <span id='vhc-scan-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
+          </div>
+        </form>
         {_BROWSER_MODAL_HTML}
         <script>
           function vhcMarkScanDirty() {{
@@ -953,8 +988,6 @@ def _render_container() -> str:
           }}
         </script>
         """
-
-    return readonly_rows + volumes_html + scan_form
 
 
 def _scan_row_html(path: str) -> str:
@@ -1082,6 +1115,11 @@ def api_container(_: Auth) -> str:
     return _render_container()
 
 
+@app.get("/api/scan_folders", response_class=HTMLResponse)
+def api_scan_folders(_: Auth) -> str:
+    return _render_scan_folders()
+
+
 @app.get("/api/recent", response_class=HTMLResponse)
 def api_recent(_: Auth) -> str:
     return _render_recent(_load())
@@ -1099,6 +1137,11 @@ def api_logs(_: Auth) -> str:
 def api_scan(_: Auth) -> JSONResponse:
     state.request_scan_now()
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/scan/progress", response_class=HTMLResponse)
+def api_scan_progress(_: Auth) -> str:
+    return _render_scan_progress()
 
 
 @app.post("/api/convert")
@@ -1165,7 +1208,7 @@ def api_scan_paths_save(
     path: Annotated[list[str], Form()] = [],
 ) -> JSONResponse:
     root = Path(_BROWSE_ROOT).resolve()
-    cleaned: list[str] = []
+    resolved_paths: list[Path] = []
     seen: set[str] = set()
     for p in path:
         p = p.strip().rstrip("/")
@@ -1181,14 +1224,30 @@ def api_scan_paths_save(
         if s in seen:
             continue
         seen.add(s)
-        cleaned.append(s)
+        resolved_paths.append(resolved)
+
+    # Drop entries whose parent (or self) is already covered — sorting lexically
+    # puts ancestors before descendants, so we only need to keep the first hit.
+    resolved_paths.sort(key=lambda p: p.as_posix())
+    kept: list[Path] = []
+    dropped: list[str] = []
+    for p in resolved_paths:
+        if any(p == k or k in p.parents for k in kept):
+            dropped.append(p.as_posix())
+            continue
+        kept.append(p)
+    cleaned = [p.as_posix() for p in kept]
 
     cfg = _load()
     cfg.scan_paths = cleaned
     save_config(cfg, _config_path, keys={"scan_paths"})
     state.request_scan_now()
-    log.info("scan_paths updated: %d entrie(s)", len(cleaned))
-    return JSONResponse({"ok": True, "count": len(cleaned)})
+    if dropped:
+        log.info("scan_paths updated: %d entrie(s); dropped %d redundant (covered by a parent): %s",
+                 len(cleaned), len(dropped), dropped)
+    else:
+        log.info("scan_paths updated: %d entrie(s)", len(cleaned))
+    return JSONResponse({"ok": True, "count": len(cleaned), "dropped": dropped})
 
 
 @app.get("/api/browse")
