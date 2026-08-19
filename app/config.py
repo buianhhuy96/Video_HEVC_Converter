@@ -29,6 +29,9 @@ class EncoderCfg:
     sharpen: int = 0
     # 0 = off; 1..5 map to vpp_qsv=denoise=N on the QSV path.
     denoise: int = 0
+    # When true, pick CRF from a source-size ladder (bigger = more aggressive).
+    # Falls back to `global_quality` below the smallest threshold.
+    dynamic_crf: bool = False
 
 
 @dataclass

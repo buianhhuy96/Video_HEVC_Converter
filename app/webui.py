@@ -543,6 +543,22 @@ def _render_page(cfg: Config) -> str:
                      {"checked" if r.delete_original else ""}>
               Overwrite original after successful validation
             </label>
+            <div class='pt-2 border-t border-slate-700'>
+              <label class='flex items-center gap-2 text-sm'>
+                <input type='checkbox' name='dynamic_crf'
+                       {"checked" if e.dynamic_crf else ""}>
+                Auto CRF by source size (overrides Quality slider per file)
+              </label>
+              <p class='text-[11px] text-slate-500 mt-1 ml-6'>
+                Bigger sources (usually less-efficiently pre-encoded) get
+                compressed harder so output sizes stay comparable. Ladder:
+                <code>&gt;7&nbsp;GB \u2192 21</code>,
+                <code>&gt;6 \u2192 20</code>,
+                <code>&gt;4 \u2192 18</code>,
+                <code>&gt;2 \u2192 16</code>.
+                Below 2&nbsp;GB the slider value applies.
+              </p>
+            </div>
             <label class='flex items-center gap-2 text-sm'>
               <input type='checkbox' name='dry_run' {"checked" if r.dry_run else ""}>
               Dry run (analyse only, no encoding)
@@ -1536,6 +1552,7 @@ def api_settings(
     sharpen: Annotated[int, Form()] = 0,
     denoise: Annotated[int, Form()] = 0,
     look_ahead_depth: Annotated[int, Form()] = 80,
+    dynamic_crf: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1566,6 +1583,7 @@ def api_settings(
     cfg.encoder.denoise = denoise
     cfg.encoder.look_ahead_depth = look_ahead_depth
     cfg.encoder.look_ahead = look_ahead_depth > 0
+    cfg.encoder.dynamic_crf = bool(dynamic_crf)
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)

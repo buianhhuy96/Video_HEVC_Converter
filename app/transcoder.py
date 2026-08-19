@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +28,25 @@ log = logging.getLogger(__name__)
 
 class NotSupported(Exception):
     """Encoding pipeline is unavailable for this file — record as skipped."""
+
+
+# Ladder for the "auto CRF by source size" option. Sorted descending: the
+# first threshold whose (min_size_gb) < actual size wins. Sources below the
+# smallest threshold keep the user's base CRF from the slider.
+_CRF_LADDER: list[tuple[float, int]] = [
+    (7.0, 21),
+    (6.0, 20),
+    (4.0, 18),
+    (2.0, 16),
+]
+
+
+def _effective_crf(size_bytes: int, base_crf: int) -> int:
+    gb = size_bytes / (1024 ** 3)
+    for min_gb, crf in _CRF_LADDER:
+        if gb > min_gb:
+            return crf
+    return base_crf
 
 
 # Containers where "-movflags +faststart" is meaningful (moov atom relocation).
@@ -198,6 +218,26 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
 
     if not has_qsv_device():
         raise NotSupported("QSV device (/dev/dri/renderD128) not available")
+
+    # Dynamic CRF: override the base value with a per-size ladder for this
+    # one encode so bigger sources (usually less-efficiently pre-encoded) get
+    # compressed harder.
+    if cfg.encoder.dynamic_crf:
+        try:
+            size_bytes = src.stat().st_size
+        except OSError:
+            size_bytes = 0
+        base_crf = cfg.encoder.global_quality
+        eff_crf = _effective_crf(size_bytes, base_crf)
+        if eff_crf != base_crf:
+            log.info(
+                "dynamic CRF: source %.1f GB \u2192 CRF %d (base %d)",
+                size_bytes / (1024 ** 3), eff_crf, base_crf,
+            )
+            cfg = dc_replace(
+                cfg, encoder=dc_replace(cfg.encoder, global_quality=eff_crf)
+            )
+
     cmd = _build_qsv_cmd(src, dst, info, cfg)
 
     enc_cfg = cfg.encoder
@@ -207,6 +247,7 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
         f"10bit={enc_cfg.allow_10bit} "
         f"look_ahead={enc_cfg.look_ahead}({enc_cfg.look_ahead_depth}) "
         f"sharpen={enc_cfg.sharpen} denoise={enc_cfg.denoise}"
+        + (" auto_crf=on" if cfg.encoder.dynamic_crf else "")
     )
     label = "QSV full-HW"
 
