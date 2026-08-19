@@ -331,8 +331,9 @@ def main() -> int:
              ui_port,
              "password required" if os.environ.get("UI_PASSWORD") else "OPEN — no password")
 
-    # Kick off with an immediate sweep so the service works out of the box.
-    state.request_sweep_now()
+    # Idle at startup: wait for the scheduled sweep time or a manual UI action.
+    # (No automatic kickoff — otherwise a restart during the day would drain the
+    # pending queue immediately, which the user does not want.)
 
     while not _shutdown:
         try:
