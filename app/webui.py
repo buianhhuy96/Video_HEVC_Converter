@@ -1467,7 +1467,7 @@ def api_pending(_: Auth) -> str:
     return _render_pending()
 
 
-@app.post("/api/settings")
+@app.post("/api/settings", response_model=None)
 def api_settings(
     request: Request,
     _: Auth,
