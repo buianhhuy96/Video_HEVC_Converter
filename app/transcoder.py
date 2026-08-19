@@ -234,13 +234,21 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
         raise NotSupported(f"unknown encoder codec: {cfg.encoder.codec!r}")
 
     last_err: str | None = None
+    enc_cfg = cfg.encoder
+    params = (
+        f"codec={enc_cfg.codec} preset={enc_cfg.preset} "
+        f"crf/global_quality={enc_cfg.global_quality} "
+        f"10bit={enc_cfg.allow_10bit} "
+        f"look_ahead={enc_cfg.look_ahead}({enc_cfg.look_ahead_depth}) "
+        f"sharpen={enc_cfg.sharpen} deband={enc_cfg.deband}"
+    )
     for label, cmd in attempts:
         if state.stop_requested():
             raise RuntimeError("stopped by user")
         if dst.exists():
             dst.unlink()
-        log.info("%s encode: %s", label, src.name)
-        state.set_current(encoder=label)
+        log.info("%s encode: %s  [%s]", label, src.name, params)
+        state.set_current(encoder=label, enc_params=params)
         rc = _run_ffmpeg(cmd, cfg)
         if rc == 0 and dst.exists() and dst.stat().st_size > 0:
             return dst

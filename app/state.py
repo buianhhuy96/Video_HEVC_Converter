@@ -25,7 +25,8 @@ _current: dict[str, Any] = {
     "path": None,
     "stage": "idle",        # idle | scanning | probing | encoding | validating | replacing
     "started_at": None,
-    "encoder": None,        # 'QSV full-HW' | 'QSV encode-only' | 'libx265'
+    "encoder": None,        # 'QSV full-HW' | 'libx265'
+    "enc_params": None,     # compact human summary of the active encoder settings
     "duration": 0.0,        # seconds — source duration (used for progress bar)
     "progress": {},         # ffmpeg -progress key=value dict
 }
@@ -102,7 +103,7 @@ def set_current(**kwargs) -> None:
 def clear_current() -> None:
     with _lock:
         _current.update(path=None, stage="idle", started_at=None,
-                        encoder=None, duration=0.0, progress={})
+                        encoder=None, enc_params=None, duration=0.0, progress={})
 
 
 def get_current() -> dict[str, Any]:

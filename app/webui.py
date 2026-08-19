@@ -797,6 +797,16 @@ def _activity_encode_body(cur: dict) -> str:
     }.get(stage_upper, "b-skip")
     filename = Path(str(cur.get("path", ""))).name
     speed = _esc(p.get("speed") or "\u2014")
+    encoder = _esc(cur.get("encoder") or "")
+    params = cur.get("enc_params") or ""
+    meta_line = ""
+    if encoder or params:
+        meta_line = (
+            "<div class='text-[11px] text-slate-500 font-mono mb-2 truncate'>"
+            + (f"{encoder} \u00b7 " if encoder else "")
+            + _esc(params)
+            + "</div>"
+        )
     return (
         "<div class='flex items-center gap-3 text-sm mb-2 flex-wrap'>"
         f"<span class='badge {stage_badge}'>{_esc(stage_upper)}</span>"
@@ -804,6 +814,7 @@ def _activity_encode_body(cur: dict) -> str:
         f"<span class='text-slate-400 ml-auto'>speed <b class='text-slate-100'>{speed}</b> \u00b7 "
         f"<b class='text-slate-100'>{pct:.1f}%</b></span>"
         "</div>"
+        + meta_line +
         "<div class='progress-track'>"
         f"<div class='progress-fill' style='width:{pct:.2f}%'></div>"
         "</div>"
@@ -885,6 +896,7 @@ def _render_progress() -> str:
           </div>
 
           <div class='font-mono text-sm text-cyan-300 break-all'>{_esc(current_path)}</div>
+          {f"<div class='font-mono text-[11px] text-slate-500'>{_esc(cur.get('enc_params'))}</div>" if cur.get('enc_params') else ""}
           {stage_hint}
 
           <div>
