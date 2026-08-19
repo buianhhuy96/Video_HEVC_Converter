@@ -46,13 +46,14 @@ WORK_DIR.mkdir(exist_ok=True)
 # Two real empty folders so the folder add/remove UI has something valid
 # to point at on your local machine.
 MEDIA = WORKSPACE / "fake_media"
-(MEDIA / "Movies").mkdir(parents=True, exist_ok=True)
-(MEDIA / "TVShows").mkdir(parents=True, exist_ok=True)
+(MEDIA / "volume2" / "Movies").mkdir(parents=True, exist_ok=True)
+(MEDIA / "volume2" / "TVShows").mkdir(parents=True, exist_ok=True)
+(MEDIA / "volume2" / "Home Videos").mkdir(parents=True, exist_ok=True)
 
 CONFIG_PATH.write_text(f"""\
 scan_paths:
-  - {(MEDIA / "Movies").as_posix()}
-  - {(MEDIA / "TVShows").as_posix()}
+  - {(MEDIA / "volume2" / "Movies").as_posix()}
+  - {(MEDIA / "volume2" / "TVShows").as_posix()}
 
 video_extensions: [.mp4, .mkv, .mov, .avi, .wmv, .flv, .m4v, .ts, .m2ts, .webm]
 skip_codecs: [hevc, h265, av1, vp9]
@@ -110,12 +111,13 @@ MOCK_COMPOSE.write_text(
     "      - ./state:/state\n"
     "      - /var/run/docker.sock:/var/run/docker.sock\n"
     "      - ./docker-compose.yml:/compose/docker-compose.yml:rw\n"
-    "      - /volume2/Movies:/media/Movies\n"
-    "      - /volume2/TVShows:/media/TVShows\n"
+    "      - /volume2:/media/volume2\n"
     "      - ./tmp:/tmp/convert\n",
     encoding="utf-8",
 )
 webui._COMPOSE_PATH = str(MOCK_COMPOSE)
+# Root the mock folder picker at the fake media tree instead of /media.
+webui._BROWSE_ROOT = str(MEDIA)
 
 
 # ---------------------------------------------------------------------------

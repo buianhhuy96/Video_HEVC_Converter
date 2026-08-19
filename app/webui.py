@@ -39,6 +39,10 @@ PRESETS = ["veryfast", "fast", "medium", "slow", "slower", "veryslow"]
 _COMPOSE_PATH = "/compose/docker-compose.yml"
 _COMPOSE_SERVICE = "video-converter"
 
+# Root the folder-picker walks. Everything selectable must be under this path.
+# Overridden by the mock UI to point at a local fake tree.
+_BROWSE_ROOT = "/media"
+
 try:
     from ruamel.yaml import YAML  # roundtrip preserves comments
     _COMPOSE_YAML = YAML()
@@ -200,11 +204,11 @@ def _container_info() -> dict:
         "qsv": ("present" if Path("/dev/dri/renderD128").exists() else "not detected"),
         "media_mounts": [],
     }
-    media_root = Path("/media")
+    media_root = Path(_BROWSE_ROOT)
     if media_root.is_dir():
         try:
             info["media_mounts"] = sorted(
-                str(p) for p in media_root.iterdir() if p.is_dir()
+                p.as_posix() for p in media_root.iterdir() if p.is_dir()
             )
         except OSError:
             pass
@@ -371,11 +375,10 @@ def _render_page(cfg: Config) -> str:
       <section class='card'>
         <h2 class='font-semibold text-lg mb-1'>Container</h2>
         <p class='text-xs text-slate-400 mb-4 max-w-2xl'>
-          These settings live in <code>docker-compose.yml</code>. Edit the
-          <strong>Media folders</strong> below and click <strong>Save &amp;
-          Restart app</strong> to apply — any running encode is killed and
-          Docker brings the app back automatically (UI unreachable for ~15
-          seconds).
+          Runtime settings from <code>docker-compose.yml</code> (read-only). The
+          <strong>Scan folders</strong> section below picks which subfolders of
+          the mounted volumes the app scans; changes apply immediately with no
+          restart.
         </p>
         <div id='container-info' hx-get='/api/container' hx-trigger='load'>…</div>
       </section>
@@ -857,8 +860,7 @@ def _render_recent(cfg: Config) -> str:
 
 def _render_container() -> str:
     info = _container_info()
-    editable = _can_edit_compose()
-    can_restart = _can_docker_compose()
+    cfg = _load()
 
     qsv_cls = "text-emerald-400" if info["qsv"] == "present" else "text-amber-400"
     auth_cls = "text-emerald-400" if info["ui_auth"].startswith("password") else "text-amber-400"
@@ -879,105 +881,176 @@ def _render_container() -> str:
         + row("Intel QSV",     f"<span class='{qsv_cls}'>{_esc(info['qsv'])}</span>")
     )
 
-    if editable:
-        mounts = _media_mounts_from_compose()
-        if not mounts:
-            mounts = [{"host": "", "container": "/media"}]
-        rows_html = "".join(_mount_row_html(m["host"], m["container"]) for m in mounts)
-        restart_note = "" if can_restart else (
-            "<p class='text-xs text-amber-400 mt-2'>"
-            "Docker socket not available \u2014 saving writes the file but "
-            "does <em>not</em> restart the container. Run "
-            "<code>docker compose up -d</code> on the NAS host to apply."
-            "</p>"
+    # NAS volumes visible under /media at runtime (readonly — set in compose).
+    detected = info["media_mounts"]
+    if detected:
+        mount_html = "".join(
+            f"<div class='font-mono text-xs text-cyan-300'>{_esc(m)}</div>"
+            for m in detected
         )
-        edit_html = f"""
+    else:
+        mount_html = (
+            "<div class='text-xs text-amber-400'>"
+            "no volumes mounted under /media — edit docker-compose.yml"
+            "</div>"
+        )
+    volumes_html = row("Mounted volumes", mount_html)
+
+    # Scan folders: subset of the mounted volumes that the app actively scans.
+    # Editable via UI (writes config.yaml + triggers a rescan — no restart).
+    rows_html = "".join(_scan_row_html(p) for p in cfg.scan_paths)
+    scan_form = f"""
         <div class='mt-4 pt-4 border-t border-slate-700'>
           <div class='flex items-center justify-between mb-2'>
-            <h3 class='text-sm font-semibold uppercase tracking-wide text-slate-300'>Media folders</h3>
-            <button type='button' onclick='vhcAddMount()' class='btn btn-ghost text-xs'>+ Add folder</button>
+            <h3 class='text-sm font-semibold uppercase tracking-wide text-slate-300'>Scan folders</h3>
+            <button type='button' onclick='vhcOpenBrowser(null)' class='btn btn-ghost text-xs'>+ Add folder…</button>
           </div>
           <p class='text-xs text-slate-400 mb-3'>
-            Each row is a host path on the NAS. It is bind-mounted into the
-            container <em>and</em> added to the scan list in one step. The
-            container path is auto-derived from the host folder name; edit it
-            manually only if you need to.
+            Folders under <code class='font-mono'>{_esc(_BROWSE_ROOT)}/</code>
+            that the app scans for videos. Changes take effect on the next
+            scan — no restart required.
           </p>
-          <form id='vhc-mounts-form'
-                hx-post='/api/container/mounts/save' hx-swap='none'
-                oninput='vhcMarkFormDirty()'
-                onsubmit="if(!confirm('Save folders and restart the app? Any running encode will be killed and the container recreated. The UI may be unreachable for ~15 seconds.'))return false; setTimeout(()=&gt;location.reload(),15000);">
-            <div id='mount-rows' class='space-y-2'>{rows_html}</div>
-            {restart_note}
+          <form id='vhc-scan-form'
+                hx-post='/api/scan_paths/save' hx-swap='none'
+                oninput='vhcMarkScanDirty()'>
+            <div id='scan-rows' class='space-y-2'>{rows_html}</div>
             <div class='mt-4'>
-              <button id='vhc-save-btn' class='btn btn-danger disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600' disabled>
-                Save &amp; Restart app
+              <button id='vhc-scan-save' class='btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-600' disabled>
+                Save
               </button>
-              <span id='vhc-dirty-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
+              <span id='vhc-scan-hint' class='text-xs text-slate-400 ml-2'>No changes to apply.</span>
             </div>
           </form>
         </div>
+        {_BROWSER_MODAL_HTML}
         <script>
-          function vhcMarkFormDirty() {{
-            const btn = document.getElementById('vhc-save-btn');
-            const hint = document.getElementById('vhc-dirty-hint');
+          function vhcMarkScanDirty() {{
+            const btn = document.getElementById('vhc-scan-save');
+            const hint = document.getElementById('vhc-scan-hint');
             if (btn) {{ btn.disabled = false; }}
             if (hint) {{ hint.textContent = 'Unsaved changes.'; hint.classList.remove('text-slate-400'); hint.classList.add('text-amber-400'); }}
           }}
-          function vhcDeriveContainer(hostInput) {{
-            const row = hostInput.parentElement;
-            const containerInput = row.querySelector("input[name='container']");
-            if (containerInput.dataset.userEdited === '1') return;
-            const host = hostInput.value.trim().replace(/\\/+$/, '');
-            if (!host) {{ containerInput.value = ''; return; }}
-            const base = host.split('/').pop() || 'media';
-            containerInput.value = '/media/' + base;
-          }}
-          function vhcMarkEdited(el) {{ el.dataset.userEdited = '1'; }}
-          function vhcRemoveRow(btn) {{ btn.parentElement.remove(); vhcMarkFormDirty(); }}
-          function vhcAddMount() {{
-            const c = document.getElementById('mount-rows');
+          function vhcRemoveScanRow(btn) {{ btn.parentElement.remove(); vhcMarkScanDirty(); }}
+          function vhcAddScanRow(path) {{
+            const c = document.getElementById('scan-rows');
             const row = document.createElement('div');
             row.className = 'flex items-center gap-2';
-            row.innerHTML = "<input type='text' name='host' placeholder='/volume2/Movies' class='flex-1 font-mono text-sm' oninput='vhcDeriveContainer(this)'>"
-              + "<span class='text-slate-500'>&rarr;</span>"
-              + "<input type='text' name='container' placeholder='/media/<name>' class='flex-1 font-mono text-sm' oninput='vhcMarkEdited(this)'>"
-              + "<button type='button' class='text-red-400 hover:text-red-300 px-2' onclick='vhcRemoveRow(this)'>&times;</button>";
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.name = 'path';
+            input.readOnly = true;
+            input.className = 'flex-1 font-mono text-sm bg-slate-900';
+            input.value = path || '';
+            const rm = document.createElement('button');
+            rm.type = 'button';
+            rm.className = 'text-red-400 hover:text-red-300 px-2';
+            rm.innerHTML = '&times;';
+            rm.addEventListener('click', () => vhcRemoveScanRow(rm));
+            row.appendChild(input);
+            row.appendChild(rm);
             c.appendChild(row);
-            vhcMarkFormDirty();
+            vhcMarkScanDirty();
           }}
-          document.querySelectorAll("#mount-rows input[name='container']").forEach(el => {{ if (el.value) el.dataset.userEdited = '1'; }});
         </script>
         """
-    else:
-        detected = info["media_mounts"]
-        if detected:
-            mount_html = "".join(
-                f"<div class='font-mono text-xs text-cyan-300'>{_esc(m)}</div>"
-                for m in detected
-            )
-        else:
-            mount_html = "<div class='text-xs text-slate-400'>none detected under /media</div>"
-        edit_html = row("Bind mounts", mount_html) + (
-            "<p class='text-xs text-amber-400 mt-3'>"
-            "docker-compose.yml is not mounted into this container (read-only). "
-            "Edit the file on the NAS host to change bind mounts, then run "
-            "<code>docker compose up -d</code>."
-            "</p>"
-        )
 
-    return readonly_rows + edit_html
+    return readonly_rows + volumes_html + scan_form
 
 
-def _mount_row_html(host: str, container: str) -> str:
+def _scan_row_html(path: str) -> str:
     return (
         "<div class='flex items-center gap-2'>"
-        f"<input type='text' name='host' value='{_esc(host)}' placeholder='/volume2/Movies' class='flex-1 font-mono text-sm' oninput='vhcDeriveContainer(this)'>"
-        "<span class='text-slate-500'>&rarr;</span>"
-        f"<input type='text' name='container' value='{_esc(container)}' placeholder='/media/<name>' class='flex-1 font-mono text-sm' oninput='vhcMarkEdited(this)'>"
-        "<button type='button' class='text-red-400 hover:text-red-300 px-2' onclick='vhcRemoveRow(this)'>&times;</button>"
+        f"<input type='text' name='path' value='{_esc(path)}' readonly class='flex-1 font-mono text-sm bg-slate-900'>"
+        "<button type='button' class='text-red-400 hover:text-red-300 px-2' onclick='vhcRemoveScanRow(this)'>&times;</button>"
         "</div>"
     )
+
+
+# Folder-picker modal. Rendered once inside the Container card; opened by the
+# Browse… buttons on each scan-folder row.
+_BROWSER_MODAL_HTML = r"""
+<div id='vhc-browse-modal' class='hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70'>
+  <div class='bg-slate-800 rounded-lg shadow-xl w-full max-w-lg mx-4 p-4'>
+    <div class='flex items-center justify-between mb-3'>
+      <h3 class='text-lg font-semibold'>Choose a folder</h3>
+      <button type='button' onclick='vhcCloseBrowser()' class='text-slate-400 hover:text-slate-200 text-xl leading-none'>&times;</button>
+    </div>
+    <div class='mb-2 flex items-center gap-2'>
+      <button id='vhc-browse-up' type='button' onclick='vhcBrowseUp()' class='btn btn-ghost text-xs'>Up</button>
+      <div id='vhc-browse-path' class='font-mono text-xs text-cyan-300 flex-1 truncate'></div>
+    </div>
+    <div id='vhc-browse-list' class='max-h-72 overflow-y-auto border border-slate-700 rounded p-1 mb-3 bg-slate-900'>
+      <div class='text-slate-500 text-xs p-2'>Loading…</div>
+    </div>
+    <div class='flex justify-end gap-2'>
+      <button type='button' onclick='vhcCloseBrowser()' class='btn btn-ghost text-xs'>Cancel</button>
+      <button id='vhc-browse-select' type='button' onclick='vhcBrowseSelect()' class='btn btn-primary text-xs'>Select this folder</button>
+    </div>
+  </div>
+</div>
+<script>
+  let vhcBrowseTarget = null;
+  let vhcBrowseCurrent = null;
+  let vhcBrowseParent = null;
+  function vhcOpenBrowser(btn) {
+    vhcBrowseTarget = (btn && btn.parentElement) ? btn.parentElement.querySelector("input[name='path']") : null;
+    const start = (vhcBrowseTarget && vhcBrowseTarget.value.trim()) || '';
+    document.getElementById('vhc-browse-modal').classList.remove('hidden');
+    vhcBrowseLoad(start);
+  }
+  function vhcCloseBrowser() {
+    document.getElementById('vhc-browse-modal').classList.add('hidden');
+    vhcBrowseTarget = null;
+  }
+  function vhcBrowseUp() { if (vhcBrowseParent) vhcBrowseLoad(vhcBrowseParent); }
+  function vhcBrowseSelect() {
+    if (vhcBrowseCurrent) {
+      if (vhcBrowseTarget) {
+        vhcBrowseTarget.value = vhcBrowseCurrent;
+        if (typeof vhcMarkScanDirty === 'function') vhcMarkScanDirty();
+      } else if (typeof vhcAddScanRow === 'function') {
+        vhcAddScanRow(vhcBrowseCurrent);
+      }
+    }
+    vhcCloseBrowser();
+  }
+  async function vhcBrowseLoad(path) {
+    const list = document.getElementById('vhc-browse-list');
+    list.innerHTML = "<div class='text-slate-500 text-xs p-2'>Loading…</div>";
+    try {
+      const url = '/api/browse' + (path ? ('?path=' + encodeURIComponent(path)) : '');
+      const r = await fetch(url);
+      if (!r.ok) {
+        const err = await r.text();
+        list.innerHTML = "<div class='text-red-400 text-xs p-2'>" + (err || ('HTTP ' + r.status)) + "</div>";
+        return;
+      }
+      const data = await r.json();
+      vhcBrowseCurrent = data.path;
+      vhcBrowseParent = data.parent;
+      document.getElementById('vhc-browse-path').textContent = data.path;
+      document.getElementById('vhc-browse-up').disabled = !data.parent;
+      document.getElementById('vhc-browse-up').classList.toggle('opacity-40', !data.parent);
+      if (!data.entries.length) {
+        list.innerHTML = "<div class='text-slate-500 text-xs p-2'>(no subfolders)</div>";
+      } else {
+        list.innerHTML = '';
+        for (const e of data.entries) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'block w-full text-left px-2 py-1 text-sm font-mono hover:bg-slate-800 rounded';
+          b.textContent = '📁 ' + e.name;
+          b.dataset.path = e.path;
+          b.addEventListener('click', () => vhcBrowseLoad(b.dataset.path));
+          list.appendChild(b);
+        }
+      }
+    } catch (e) {
+      list.innerHTML = "<div class='text-red-400 text-xs p-2'>Error: " + e + "</div>";
+    }
+  }
+</script>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1086,63 +1159,68 @@ def api_clear_failed(_: Auth) -> RedirectResponse:
     return RedirectResponse("/", status_code=303)
 
 
-@app.post("/api/container/mounts/save")
-def api_container_mounts_save(
+@app.post("/api/scan_paths/save")
+def api_scan_paths_save(
     _: Auth,
-    host: Annotated[list[str], Form()] = [],
-    container: Annotated[list[str], Form()] = [],
+    path: Annotated[list[str], Form()] = [],
 ) -> JSONResponse:
-    if not _can_edit_compose():
-        raise HTTPException(500, "docker-compose.yml is not writable from this container")
-    if len(host) != len(container):
-        raise HTTPException(400, "host and container path counts must match")
-
-    new_entries: list[str] = []
+    root = Path(_BROWSE_ROOT).resolve()
+    cleaned: list[str] = []
     seen: set[str] = set()
-    for h, c in zip(host, container):
-        h = h.strip()
-        c = c.strip()
-        if not h and not c:
+    for p in path:
+        p = p.strip().rstrip("/")
+        if not p:
             continue
-        if not h or not c:
-            raise HTTPException(400, "both host and container path required for each row")
-        if not (c == "/media" or c.startswith("/media/")):
-            raise HTTPException(400, f"container path {c!r} must be /media or /media/*")
-        if c in seen:
-            raise HTTPException(400, f"container path {c!r} appears more than once")
-        seen.add(c)
-        new_entries.append(f"{h}:{c}")
+        try:
+            resolved = Path(p).resolve()
+        except OSError as e:
+            raise HTTPException(400, f"invalid path {p!r}: {e}")
+        if resolved != root and root not in resolved.parents:
+            raise HTTPException(400, f"path must be under {_BROWSE_ROOT}: {p}")
+        s = resolved.as_posix()
+        if s in seen:
+            continue
+        seen.add(s)
+        cleaned.append(s)
 
-    doc = _load_compose()
-    if doc is None:
-        raise HTTPException(500, "cannot read docker-compose.yml")
-
-    svc = doc.get("services", {}).get(_COMPOSE_SERVICE)
-    if svc is None:
-        raise HTTPException(500, f"service '{_COMPOSE_SERVICE}' missing from compose file")
-
-    volumes = svc.get("volumes", []) or []
-    # Keep non-/media (system) mounts intact, replace all /media entries.
-    kept = []
-    for v in volumes:
-        _, container_path, _mode = _parse_volume(v)
-        if not (container_path == "/media" or container_path.startswith("/media/")):
-            kept.append(v)
-    svc["volumes"] = kept + new_entries
-
-    _save_compose(doc)
-    log.info("compose media mounts updated: %d entrie(s)", len(new_entries))
-
-    # Mirror the container-side paths into config.yaml scan_paths so a saved
-    # media folder is both bind-mounted and picked up by the discovery pass.
     cfg = _load()
-    cfg.scan_paths = [entry.split(":", 1)[1] for entry in new_entries]
+    cfg.scan_paths = cleaned
     save_config(cfg, _config_path, keys={"scan_paths"})
+    state.request_scan_now()
+    log.info("scan_paths updated: %d entrie(s)", len(cleaned))
+    return JSONResponse({"ok": True, "count": len(cleaned)})
 
-    if _can_docker_compose():
-        _spawn_compose_recreate()
-        return JSONResponse({"ok": True, "restarted": True, "count": len(new_entries)})
-    return JSONResponse({"ok": True, "restarted": False, "count": len(new_entries)})
+
+@app.get("/api/browse")
+def api_browse(_: Auth, path: str = "") -> JSONResponse:
+    root = Path(_BROWSE_ROOT).resolve()
+    if not path:
+        target = root
+    else:
+        try:
+            target = Path(path).resolve()
+        except OSError as e:
+            raise HTTPException(400, f"invalid path: {e}")
+        if target != root and root not in target.parents:
+            raise HTTPException(400, f"path must be under {_BROWSE_ROOT}")
+    if not target.is_dir():
+        raise HTTPException(404, f"not a directory: {target}")
+
+    try:
+        children = [
+            c for c in target.iterdir()
+            if c.is_dir() and not c.name.startswith(".")
+        ]
+    except OSError as e:
+        raise HTTPException(500, f"cannot list: {e}")
+    children.sort(key=lambda c: c.name.lower())
+
+    return JSONResponse({
+        "path": target.as_posix(),
+        "parent": target.parent.as_posix() if target != root else None,
+        "root": root.as_posix(),
+        "entries": [{"name": c.name, "path": c.as_posix()} for c in children],
+    })
 
 
 def _spawn_compose_recreate() -> None:

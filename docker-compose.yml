@@ -32,10 +32,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./docker-compose.yml:/compose/docker-compose.yml:rw
       # ==== NAS storage mounted as /media inside the container. ====
-      # Editable in the UI (Setup tab → Container). Add/remove rows there,
-      # then click "Save & Restart app" to rewrite this file and recreate
-      # the container.
-      - /volume2/Movies:/media/Movies
-      - /volume2/TVShows:/media/TVShows
+      # Mount whole NAS volumes here; then pick which subfolders to scan
+      # from the web UI (Setup tab → Scan folders). No compose changes or
+      # restarts are needed to add/remove scan folders after this.
+      - /volume2:/media/volume2
       # Optional scratch space on fast storage for in-progress files
       - ./tmp:/tmp/convert
