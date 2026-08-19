@@ -1,9 +1,11 @@
-"""FFmpeg transcode using Intel QSV (hevc_qsv) with libx265 fallback.
+"""FFmpeg transcode using Intel QSV (hevc_qsv, full-HW only) or libx265.
 
-Encoder ladder tried in order:
-  1. Full-HW QSV       — HW decode + HW encode (fastest, coolest)
-  2. QSV encode-only   — SW decode, HW encode (rescues sources iGPU can't decode)
-  3. libx265           — pure CPU fallback
+When `cfg.encoder.codec == "hevc_qsv"` only the full-HW pipeline is tried.
+Files that aren't eligible (software filters requested, QSV device missing)
+or fail at runtime raise `NotSupported` and are recorded as *skipped* by
+`convert.py` — never silently fall back to a slower software path.
+
+When `cfg.encoder.codec == "libx265"` the pure-CPU encoder is used.
 
 A progress-based watchdog kills stalled ffmpeg jobs.
 `atomic_replace` preserves mtime & mode and cleans up on cross-device fallbacks.
@@ -24,6 +26,11 @@ from probe import HEVC_SAFE_CONTAINERS, VideoInfo, has_qsv_device
 import state
 
 log = logging.getLogger(__name__)
+
+
+class NotSupported(Exception):
+    """Encoding pipeline is unavailable for this file — record as skipped."""
+
 
 # Containers where "-movflags +faststart" is meaningful (moov atom relocation).
 FASTSTART_CONTAINERS = {".mp4", ".mov", ".m4v"}
@@ -210,12 +217,21 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
         dst.unlink()
 
     attempts: list[tuple[str, list[str]]] = []
-    if cfg.encoder.codec == "hevc_qsv" and has_qsv_device():
-        # Deband and sharpen run in software, so skip full-HW when either is on.
-        if not cfg.encoder.deband and not cfg.encoder.sharpen:
-            attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
-        attempts.append(("QSV encode-only", _build_qsv_cmd(src, dst, info, cfg, hw_decode=False)))
-    attempts.append(("libx265", _build_x265_cmd(src, dst, info, cfg)))
+    if cfg.encoder.codec == "hevc_qsv":
+        if not has_qsv_device():
+            raise NotSupported("QSV device (/dev/dri/renderD128) not available")
+        # Sharpen and deband run in software — they force encode-only mode,
+        # which the user has opted out of. Skip the file instead of degrading.
+        if cfg.encoder.deband or cfg.encoder.sharpen:
+            raise NotSupported(
+                "software filter enabled (deband/sharpen) is incompatible "
+                "with QSV full-HW mode"
+            )
+        attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
+    elif cfg.encoder.codec == "libx265":
+        attempts.append(("libx265", _build_x265_cmd(src, dst, info, cfg)))
+    else:
+        raise NotSupported(f"unknown encoder codec: {cfg.encoder.codec!r}")
 
     last_err: str | None = None
     for label, cmd in attempts:
@@ -235,7 +251,9 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
 
     if dst.exists():
         dst.unlink()
-    raise RuntimeError(f"all encoders failed for {src}: {last_err}")
+    # Only one attempt is ever queued now; treat its failure as "not supported"
+    # so the file is recorded as skipped, not retried on the next sweep.
+    raise NotSupported(f"encoder failed: {last_err}")
 
 
 def _run_ffmpeg(cmd: list[str], cfg: Config) -> int:

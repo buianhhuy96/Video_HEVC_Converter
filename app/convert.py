@@ -15,7 +15,7 @@ import webui
 from config import Config, load_config
 from probe import Skip, classify, has_qsv_device
 from store import Store
-from transcoder import atomic_replace, transcode
+from transcoder import NotSupported, atomic_replace, transcode
 from validator import ValidationError, validate
 
 log = logging.getLogger("converter")
@@ -197,6 +197,11 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             log.info("VALIDATE-CANCELLED %s", path)
         else:
             store.record(path, "failed", reason=f"validate: {e}", orig_codec=info.codec)
+    except NotSupported as e:
+        log.info("SKIP  %s  (%s)", path, e)
+        if tmp_out and tmp_out.exists():
+            tmp_out.unlink(missing_ok=True)
+        store.record(path, "skipped", reason=f"encoder: {e}", orig_codec=info.codec)
     except Exception as e:  # noqa: BLE001
         if tmp_out and tmp_out.exists():
             tmp_out.unlink(missing_ok=True)
