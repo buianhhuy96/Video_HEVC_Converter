@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Annotated
 
 import uvicorn
-from fastapi import Depends, FastAPI, Form, HTTPException, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -393,7 +393,11 @@ def _render_page(cfg: Config) -> str:
       <div class='grid md:grid-cols-1 gap-6'>
         <section class='card'>
           <h2 class='font-semibold mb-3 text-lg'>Settings</h2>
-          <form method='post' action='/api/settings' class='space-y-4'>
+          <form method='post' action='/api/settings'
+                hx-post='/api/settings'
+                hx-trigger='change delay:400ms from:input, change delay:400ms from:select'
+                hx-swap='innerHTML' hx-target='#vhc-settings-status'
+                class='space-y-4'>
             <div>
               <div class='flex items-baseline justify-between mb-1'>
                 <label class='text-sm'>Quality <span class='text-slate-400'>(higher = bigger file)</span></label>
@@ -476,6 +480,10 @@ def _render_page(cfg: Config) -> str:
               Overwrite original after successful validation
             </label>
             <label class='flex items-center gap-2 text-sm'>
+              <input type='checkbox' name='deband' {"checked" if e.deband else ""}>
+              Deband (soften 8-bit banding — forces software encode, skipped in QSV-only mode)
+            </label>
+            <label class='flex items-center gap-2 text-sm'>
               <input type='checkbox' name='dry_run' {"checked" if r.dry_run else ""}>
               Dry run (analyse only, no encoding)
             </label>
@@ -486,8 +494,8 @@ def _render_page(cfg: Config) -> str:
             </p>
             <div class='pt-2'>
               <button class='btn btn-primary'>Save settings</button>
-              <span class='text-xs text-slate-400 ml-2'>
-                Takes effect at the start of the next sweep.
+              <span id='vhc-settings-status' class='text-xs ml-2 text-slate-400'>
+                Auto-saves on change. Applies to the next encode.
               </span>
             </div>
           </form>
@@ -1372,8 +1380,13 @@ _BROWSER_MODAL_HTML = r"""
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-def index(_: Auth) -> str:
-    return _render_page(_load())
+def index(_: Auth) -> HTMLResponse:
+    # no-store so the browser never serves stale JS (slider ranges, mappings)
+    # after a server update.
+    return HTMLResponse(
+        _render_page(_load()),
+        headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/api/status", response_class=HTMLResponse)
@@ -1456,14 +1469,16 @@ def api_pending(_: Auth) -> str:
 
 @app.post("/api/settings")
 def api_settings(
+    request: Request,
     _: Auth,
     global_quality: Annotated[int, Form()] = 21,
     preset: Annotated[str, Form()] = "veryslow",
     sharpen: Annotated[int, Form()] = 0,
+    deband: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
-) -> RedirectResponse:
+) -> HTMLResponse | RedirectResponse:
     if not 15 <= global_quality <= 30:
         raise HTTPException(400, "global_quality must be 15-30")
     if preset not in PRESETS:
@@ -1483,10 +1498,17 @@ def api_settings(
     cfg.encoder.global_quality = global_quality
     cfg.encoder.preset = preset
     cfg.encoder.sharpen = sharpen
+    cfg.encoder.deband = bool(deband)
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
     save_config(cfg, _config_path, keys={"encoder", "output", "runtime"})
+
+    if request.headers.get("HX-Request"):
+        return HTMLResponse(
+            "<span class='text-emerald-400'>\u2713 Saved</span> "
+            "<span class='text-slate-500'>\u00b7 applies to the next encode</span>"
+        )
     return RedirectResponse("/", status_code=303)
 
 
