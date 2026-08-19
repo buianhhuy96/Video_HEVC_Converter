@@ -32,13 +32,15 @@ class NotSupported(Exception):
 
 # Ladder for the "auto CRF by source size" option. Sorted descending: the
 # first threshold whose (min_size_gb) < actual size wins. Sources below the
-# smallest threshold keep the user's base CRF from the slider.
+# smallest threshold fall back to `_CRF_MIN`.
 _CRF_LADDER: list[tuple[float, int]] = [
-    (7.0, 21),
+    (8.0, 23),
+    (7.0, 22),
     (6.0, 20),
     (4.0, 18),
     (2.0, 16),
 ]
+_CRF_MIN = 15  # applied to sources smaller than the smallest ladder threshold
 
 
 def _effective_crf(size_bytes: int, base_crf: int) -> int:
@@ -46,7 +48,7 @@ def _effective_crf(size_bytes: int, base_crf: int) -> int:
     for min_gb, crf in _CRF_LADDER:
         if gb > min_gb:
             return crf
-    return base_crf
+    return _CRF_MIN
 
 
 # Containers where "-movflags +faststart" is meaningful (moov atom relocation).

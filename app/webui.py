@@ -552,11 +552,12 @@ def _render_page(cfg: Config) -> str:
               <p class='text-[11px] text-slate-500 mt-1 ml-6'>
                 Bigger sources (usually less-efficiently pre-encoded) get
                 compressed harder so output sizes stay comparable. Ladder:
-                <code>&gt;7&nbsp;GB \u2192 21</code>,
+                <code>&gt;8&nbsp;GB \u2192 23</code>,
+                <code>&gt;7 \u2192 22</code>,
                 <code>&gt;6 \u2192 20</code>,
                 <code>&gt;4 \u2192 18</code>,
-                <code>&gt;2 \u2192 16</code>.
-                Below 2&nbsp;GB the slider value applies.
+                <code>&gt;2 \u2192 16</code>,
+                <code>\u22642 \u2192 15</code>.
               </p>
             </div>
             <label class='flex items-center gap-2 text-sm'>
