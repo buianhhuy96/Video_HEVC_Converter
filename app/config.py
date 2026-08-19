@@ -19,10 +19,10 @@ except ImportError:  # optional: PyYAML fallback loses comments on write
 @dataclass
 class EncoderCfg:
     codec: str = "hevc_qsv"
-    global_quality: int = 21
+    global_quality: int = 18
     preset: str = "veryslow"
     look_ahead: bool = True
-    look_ahead_depth: int = 40
+    look_ahead_depth: int = 80
     allow_10bit: bool = True
     max_bitrate_kbps: int = 0
     deband: bool = False

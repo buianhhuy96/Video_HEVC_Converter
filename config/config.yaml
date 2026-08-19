@@ -86,19 +86,20 @@ encoder:
   codec: hevc_qsv
 
   # ICQ (Intelligent Constant Quality) — quality-based, closest to CRF.
-  # Lower = higher quality / larger file. Sensible range: 20 (high) – 26 (small).
-  # 21 targets cleaner output for demanding playback (e.g. madVR post-processing).
+  # Lower = higher quality / larger file. Sensible range: 15 (near-lossless)
+  # to 30 (small). 18 is a good archival default for HEVC QSV; drop to 15 for
+  # cherished grainy films.
   # libx265 uses this same value as its CRF when the GPU path isn't available.
-  global_quality: 21
+  global_quality: 18
 
   # Slower preset = better compression at the same quality. "veryslow" is the
   # highest reasonable setting; QSV runs it well and libx265 uses it if it's
   # ever engaged (accept the CPU cost when the NAS is idle at night).
   preset: veryslow
 
-  # Lookahead improves quality on scene changes. Depth in frames.
+  # Lookahead improves quality on scene changes. Depth in frames (max 100).
   look_ahead: true
-  look_ahead_depth: 40
+  look_ahead_depth: 80
 
   # Emit 10-bit HEVC (main10) for every source when true. Preserves 10-bit
   # sources and avoids encoder-introduced banding on 8-bit sources at the

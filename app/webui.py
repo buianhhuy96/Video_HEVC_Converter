@@ -287,8 +287,8 @@ def _render_page(cfg: Config) -> str:
     e, o, r = cfg.encoder, cfg.output, cfg.runtime
     preset_idx = PRESETS.index(e.preset) if e.preset in PRESETS else PRESETS.index("veryslow")
     # Quality slider works in percent (higher = better) but submits CRF.
-    # CRF range is 18 (pristine) to 30 (small); 100% = 18, 0% = 30.
-    quality_pct = round((30 - e.global_quality) * 100 / 12)
+    # CRF range is 15 (near-lossless) to 30 (small); 100% = 15, 0% = 30.
+    quality_pct = round((30 - e.global_quality) * 100 / 15)
 
     return f"""<!DOCTYPE html>
 <html lang='en'>
@@ -452,7 +452,7 @@ def _render_page(cfg: Config) -> str:
                 }};
                 window.vhcQualityUpdate = function(el) {{
                   const pct = parseInt(el.value);
-                  const crf = Math.round(30 - pct * 12 / 100);
+                  const crf = Math.round(30 - pct * 15 / 100);
                   document.getElementById('vhc-quality-val').textContent = 'CRF ' + crf;
                   document.getElementById('vhc-quality-crf').value = crf;
                 }};
@@ -1464,8 +1464,8 @@ def api_settings(
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
 ) -> RedirectResponse:
-    if not 18 <= global_quality <= 30:
-        raise HTTPException(400, "global_quality must be 18-30")
+    if not 15 <= global_quality <= 30:
+        raise HTTPException(400, "global_quality must be 15-30")
     if preset not in PRESETS:
         raise HTTPException(400, f"preset must be one of {PRESETS}")
     if not 0 <= sharpen < len(SHARPEN_NAMES):
