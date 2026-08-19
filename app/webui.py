@@ -440,9 +440,8 @@ def _render_page(cfg: Config) -> str:
                 <span>{SHARPEN_NAMES[-1]}</span>
               </div>
               <p class='text-[11px] text-slate-500 mt-1'>
-                Adds an <code>unsharp</code> pass before encoding. Recovers
-                apparent detail lost to QSV smoothing; too much causes edge
-                halos. QSV full-HW mode is disabled while sharpening is on.
+                Uses <code>vpp_qsv=detail</code> on the iGPU — stays inside
+                the full-HW pipeline. Too much causes edge halos.
               </p>
             </div>
             <script>
@@ -478,10 +477,6 @@ def _render_page(cfg: Config) -> str:
               <input type='checkbox' name='delete_original'
                      {"checked" if r.delete_original else ""}>
               Overwrite original after successful validation
-            </label>
-            <label class='flex items-center gap-2 text-sm'>
-              <input type='checkbox' name='deband' {"checked" if e.deband else ""}>
-              Deband (soften 8-bit banding — forces software encode, skipped in QSV-only mode)
             </label>
             <label class='flex items-center gap-2 text-sm'>
               <input type='checkbox' name='dry_run' {"checked" if r.dry_run else ""}>
@@ -1474,7 +1469,6 @@ def api_settings(
     global_quality: Annotated[int, Form()] = 21,
     preset: Annotated[str, Form()] = "veryslow",
     sharpen: Annotated[int, Form()] = 0,
-    deband: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1498,7 +1492,6 @@ def api_settings(
     cfg.encoder.global_quality = global_quality
     cfg.encoder.preset = preset
     cfg.encoder.sharpen = sharpen
-    cfg.encoder.deband = bool(deband)
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)

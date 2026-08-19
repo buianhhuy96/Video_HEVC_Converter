@@ -1,11 +1,8 @@
-"""FFmpeg transcode using Intel QSV (hevc_qsv, full-HW only) or libx265.
+"""FFmpeg transcode using Intel QSV — full-HW pipeline only.
 
-When `cfg.encoder.codec == "hevc_qsv"` only the full-HW pipeline is tried.
-Files that aren't eligible (software filters requested, QSV device missing)
-or fail at runtime raise `NotSupported` and are recorded as *skipped* by
-`convert.py` — never silently fall back to a slower software path.
-
-When `cfg.encoder.codec == "libx265"` the pure-CPU encoder is used.
+All encodes use `hevc_qsv` with HW decode + HW filter (vpp_qsv) + HW encode.
+Files that aren't compatible (no QSV device) raise `NotSupported` and are
+recorded as *skipped* by `convert.py`. There is no software fallback.
 
 A progress-based watchdog kills stalled ffmpeg jobs.
 `atomic_replace` preserves mtime & mode and cleans up on cross-device fallbacks.
@@ -41,19 +38,25 @@ def _choose_container(src: Path, cfg: Config) -> str:
     return ext if ext in HEVC_SAFE_CONTAINERS else cfg.output.fallback_container
 
 
-# Level → unsharp `luma_amount`. Chroma left at 0 to avoid colour fringing.
-_SHARPEN_STRENGTHS = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6}
+# Level → vpp_qsv `detail` (HW detail enhancer, 0..100).
+_VPP_DETAIL_STRENGTHS = {1: 20, 2: 40, 3: 60, 4: 80, 5: 100}
 
 
-def _pre_filters(cfg: Config) -> str:
-    """Software-domain filter chain applied before the encoder."""
-    filters = []
-    if cfg.encoder.deband:
-        filters.append("gradfun=1.5:8")
-    amt = _SHARPEN_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
-    if amt is not None:
-        filters.append(f"unsharp=5:5:{amt:.2f}:5:5:0.0")
-    return ",".join(filters)
+def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
+    """HW-side filter chain (vpp_qsv). Kept in the full-HW pipeline.
+
+    `out_fmt` is p010le / nv12 to convert to, or None to skip format change.
+    Returns an empty string when nothing needs to happen.
+    """
+    parts: list[str] = []
+    detail = _VPP_DETAIL_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
+    if detail is not None:
+        parts.append(f"detail={detail}")
+    if out_fmt:
+        parts.append(f"format={out_fmt}")
+    if not parts:
+        return ""
+    return "vpp_qsv=" + ":".join(parts)
 
 
 def _needs_bt709_bsf(info: VideoInfo) -> bool:
@@ -117,11 +120,11 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
 
 
 def _build_qsv_cmd(
-    src: Path, dst: Path, info: VideoInfo, cfg: Config, *, hw_decode: bool
+    src: Path, dst: Path, info: VideoInfo, cfg: Config,
 ) -> list[str]:
     enc = cfg.encoder
-    # Always emit 10-bit main10 when allowed: matches libx265 fallback and
-    # avoids encoder-introduced banding on smooth 8-bit sources.
+    # Always emit 10-bit main10 when allowed: avoids encoder-introduced
+    # banding on smooth 8-bit sources.
     ten_bit = enc.allow_10bit
     out_ext = dst.suffix.lower()
 
@@ -130,26 +133,18 @@ def _build_qsv_cmd(
         "-loglevel", "warning",
         "-init_hw_device", "qsv=hw:/dev/dri/renderD128",
         "-filter_hw_device", "hw",
+        "-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
+        "-i", str(src),
     ]
-    if hw_decode:
-        cmd += ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
-
-    cmd += ["-i", str(src)]
     cmd += _stream_map_args(cfg, info)
 
-    if hw_decode:
-        if ten_bit and info.bit_depth < 10:
-            # Convert 8-bit HW-decoded surfaces to 10-bit on the iGPU.
-            cmd += ["-filter:v:0", "scale_qsv=format=p010le"]
-    else:
-        # SW-decoded frames must be uploaded to the iGPU before hevc_qsv accepts them.
-        # Scope to output video stream 0 so mapped cover art (stream 1) is untouched.
-        sw_fmt = "p010le" if ten_bit else "nv12"
-        pre = _pre_filters(cfg)
-        chain = f"format={sw_fmt},hwupload=extra_hw_frames=64"
-        if pre:
-            chain = f"{pre},{chain}"
-        cmd += ["-filter:v:0", chain]
+    needs_10bit = ten_bit and info.bit_depth < 10
+    out_fmt = "p010le" if needs_10bit else None
+    vpp = _vpp_qsv_filter(cfg, out_fmt)
+    if vpp:
+        cmd += ["-filter:v:0", vpp]
+    elif needs_10bit:
+        cmd += ["-filter:v:0", "scale_qsv=format=p010le"]
 
     cmd += [
         "-c:v", "hevc_qsv",
@@ -164,8 +159,6 @@ def _build_qsv_cmd(
         "-bf", "4",
         "-refs", "4",
     ]
-    if not hw_decode:
-        cmd += ["-pix_fmt", "p010le" if ten_bit else "nv12"]
 
     if enc.look_ahead:
         cmd += ["-look_ahead", "1", "-look_ahead_depth", str(enc.look_ahead_depth)]
@@ -181,37 +174,6 @@ def _build_qsv_cmd(
     return cmd
 
 
-def _build_x265_cmd(src: Path, dst: Path, info: VideoInfo, cfg: Config) -> list[str]:
-    enc = cfg.encoder
-    # Always emit 10-bit main10 when allowed: matches QSV path.
-    ten_bit = enc.allow_10bit
-    out_ext = dst.suffix.lower()
-
-    cmd = [
-        "ffmpeg", "-hide_banner", "-y",
-        "-loglevel", "warning",
-        "-i", str(src),
-    ]
-    cmd += _stream_map_args(cfg, info)
-    pre = _pre_filters(cfg)
-    if pre:
-        cmd += ["-filter:v:0", pre]
-    cmd += [
-        "-c:v", "libx265",
-        "-preset", enc.preset,
-        # `-tune grain` + aq-mode=3 + no-sao is the classic grain-preserving
-        # recipe: keeps film-grain intact and avoids the loop-filter smoothing
-        # that eats micro-contrast at higher CRF.
-        "-tune", "grain",
-        "-crf", str(enc.global_quality),
-        "-pix_fmt", "yuv420p10le" if ten_bit else "yuv420p",
-        "-x265-params", "log-level=error:aq-mode=3:no-sao=1",
-    ]
-    if enc.max_bitrate_kbps > 0:
-        cmd += [
-            "-maxrate", f"{enc.max_bitrate_kbps}k",
-            "-bufsize", f"{enc.max_bitrate_kbps * 2}k",
-        ]
     cmd += _common_output_args(out_ext, cfg, info)
     cmd += [str(dst)]
     return cmd
@@ -228,52 +190,33 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
     if dst.exists():
         dst.unlink()
 
-    attempts: list[tuple[str, list[str]]] = []
-    if cfg.encoder.codec == "hevc_qsv":
-        if not has_qsv_device():
-            raise NotSupported("QSV device (/dev/dri/renderD128) not available")
-        # Sharpen and deband run in software — they force encode-only mode,
-        # which the user has opted out of. Skip the file instead of degrading.
-        if cfg.encoder.deband or cfg.encoder.sharpen:
-            raise NotSupported(
-                "software filter enabled (deband/sharpen) is incompatible "
-                "with QSV full-HW mode"
-            )
-        attempts.append(("QSV full-HW", _build_qsv_cmd(src, dst, info, cfg, hw_decode=True)))
-    elif cfg.encoder.codec == "libx265":
-        attempts.append(("libx265", _build_x265_cmd(src, dst, info, cfg)))
-    else:
-        raise NotSupported(f"unknown encoder codec: {cfg.encoder.codec!r}")
+    if not has_qsv_device():
+        raise NotSupported("QSV device (/dev/dri/renderD128) not available")
+    cmd = _build_qsv_cmd(src, dst, info, cfg)
 
-    last_err: str | None = None
     enc_cfg = cfg.encoder
     params = (
-        f"codec={enc_cfg.codec} preset={enc_cfg.preset} "
+        f"preset={enc_cfg.preset} "
         f"crf/global_quality={enc_cfg.global_quality} "
         f"10bit={enc_cfg.allow_10bit} "
         f"look_ahead={enc_cfg.look_ahead}({enc_cfg.look_ahead_depth}) "
-        f"sharpen={enc_cfg.sharpen} deband={enc_cfg.deband}"
+        f"sharpen={enc_cfg.sharpen}"
     )
-    for label, cmd in attempts:
-        if state.stop_requested():
-            raise RuntimeError("stopped by user")
-        if dst.exists():
-            dst.unlink()
-        log.info("%s encode: %s  [%s]", label, src.name, params)
-        state.set_current(encoder=label, enc_params=params)
-        rc = _run_ffmpeg(cmd, cfg)
-        if rc == 0 and dst.exists() and dst.stat().st_size > 0:
-            return dst
-        if state.stop_requested():
-            raise RuntimeError("stopped by user")
-        last_err = f"{label} rc={rc}"
-        log.warning("%s failed for %s (%s)", label, src.name, last_err)
+    label = "QSV full-HW"
 
+    if state.stop_requested():
+        raise RuntimeError("stopped by user")
+    log.info("%s encode: %s  [%s]", label, src.name, params)
+    state.set_current(encoder=label, enc_params=params)
+    rc = _run_ffmpeg(cmd, cfg)
+    if rc == 0 and dst.exists() and dst.stat().st_size > 0:
+        return dst
+    if state.stop_requested():
+        raise RuntimeError("stopped by user")
+    log.warning("%s failed for %s (rc=%d)", label, src.name, rc)
     if dst.exists():
         dst.unlink()
-    # Only one attempt is ever queued now; treat its failure as "not supported"
-    # so the file is recorded as skipped, not retried on the next sweep.
-    raise NotSupported(f"encoder failed: {last_err}")
+    raise NotSupported(f"encoder failed: {label} rc={rc}")
 
 
 def _run_ffmpeg(cmd: list[str], cfg: Config) -> int:

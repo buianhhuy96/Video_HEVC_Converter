@@ -316,7 +316,7 @@ def main() -> int:
     if has_qsv_device():
         log.info("Intel /dev/dri/renderD128 present — QSV path available")
     else:
-        log.warning("No /dev/dri/renderD128 — will fall back to CPU libx265")
+        log.warning("No /dev/dri/renderD128 — QSV encodes will be skipped")
 
     store = Store(cfg.runtime.state_db)
 

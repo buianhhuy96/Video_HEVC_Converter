@@ -25,7 +25,7 @@ _current: dict[str, Any] = {
     "path": None,
     "stage": "idle",        # idle | scanning | probing | encoding | validating | replacing
     "started_at": None,
-    "encoder": None,        # 'QSV full-HW' | 'libx265'
+    "encoder": None,        # 'QSV full-HW'
     "enc_params": None,     # compact human summary of the active encoder settings
     "duration": 0.0,        # seconds — source duration (used for progress bar)
     "progress": {},         # ffmpeg -progress key=value dict

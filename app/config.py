@@ -18,17 +18,14 @@ except ImportError:  # optional: PyYAML fallback loses comments on write
 
 @dataclass
 class EncoderCfg:
-    codec: str = "hevc_qsv"
     global_quality: int = 18
     preset: str = "veryslow"
     look_ahead: bool = True
     look_ahead_depth: int = 80
     allow_10bit: bool = True
     max_bitrate_kbps: int = 0
-    deband: bool = False
     preserve_color_metadata: bool = True
-    # 0 = off; 1..5 map to increasing unsharp-mask strength. Recovers
-    # micro-contrast lost to QSV's smoothing at higher CRF values.
+    # 0 = off; 1..5 map to vpp_qsv=detail=N on the QSV path.
     sharpen: int = 0
 
 
