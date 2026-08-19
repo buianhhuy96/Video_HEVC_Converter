@@ -27,6 +27,8 @@ class EncoderCfg:
     preserve_color_metadata: bool = True
     # 0 = off; 1..5 map to vpp_qsv=detail=N on the QSV path.
     sharpen: int = 0
+    # 0 = off; 1..5 map to vpp_qsv=denoise=N on the QSV path.
+    denoise: int = 0
 
 
 @dataclass

@@ -40,6 +40,9 @@ def _choose_container(src: Path, cfg: Config) -> str:
 
 # Level → vpp_qsv `detail` (HW detail enhancer, 0..100).
 _VPP_DETAIL_STRENGTHS = {1: 20, 2: 40, 3: 60, 4: 80, 5: 100}
+# Level → vpp_qsv `denoise` (HW noise reducer, 0..100). Aggressive values
+# also erase film grain, so keep the curve gentler than detail.
+_VPP_DENOISE_STRENGTHS = {1: 5, 2: 15, 3: 30, 4: 50, 5: 80}
 
 
 def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
@@ -52,6 +55,9 @@ def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
     detail = _VPP_DETAIL_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
     if detail is not None:
         parts.append(f"detail={detail}")
+    denoise = _VPP_DENOISE_STRENGTHS.get(int(cfg.encoder.denoise or 0))
+    if denoise is not None:
+        parts.append(f"denoise={denoise}")
     if out_fmt:
         parts.append(f"format={out_fmt}")
     if not parts:
@@ -160,7 +166,7 @@ def _build_qsv_cmd(
         "-refs", "4",
     ]
 
-    if enc.look_ahead:
+    if enc.look_ahead and enc.look_ahead_depth > 0:
         cmd += ["-look_ahead", "1", "-look_ahead_depth", str(enc.look_ahead_depth)]
 
     if enc.max_bitrate_kbps > 0:
@@ -200,7 +206,7 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
         f"crf/global_quality={enc_cfg.global_quality} "
         f"10bit={enc_cfg.allow_10bit} "
         f"look_ahead={enc_cfg.look_ahead}({enc_cfg.look_ahead_depth}) "
-        f"sharpen={enc_cfg.sharpen}"
+        f"sharpen={enc_cfg.sharpen} denoise={enc_cfg.denoise}"
     )
     label = "QSV full-HW"
 

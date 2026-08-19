@@ -37,6 +37,9 @@ _config_path: str = "/config/config.yaml"
 
 PRESETS = ["veryfast", "fast", "medium", "slow", "slower", "veryslow"]
 SHARPEN_NAMES = ["Off", "Very light", "Light", "Moderate", "Strong", "Very strong"]
+DENOISE_NAMES = ["Off", "Very light", "Light", "Moderate", "Strong", "Very strong"]
+# Look-ahead depth positions on the slider (0 = disabled, higher = deeper).
+LOOKAHEAD_STEPS = [0, 20, 40, 60, 80, 100]
 
 _COMPOSE_PATH = "/compose/docker-compose.yml"
 _COMPOSE_SERVICE = "video-converter"
@@ -400,9 +403,14 @@ def _render_page(cfg: Config) -> str:
                 class='space-y-4'>
             <div>
               <div class='flex items-baseline justify-between mb-1'>
-                <label class='text-sm'>Quality <span class='text-slate-400'>(higher = bigger file)</span></label>
+                <label class='text-sm'>Quality</label>
                 <span id='vhc-quality-val' class='font-mono text-slate-100 text-sm'>CRF {e.global_quality}</span>
               </div>
+              <p class='text-[11px] text-slate-500 mb-2'>
+                Target quality for the encoder. Lower CRF = better quality and
+                bigger files. QSV plateaus around CRF 18\u201320 (going lower
+                buys little).
+              </p>
               <input type='range' min='0' max='100' step='1'
                      value='{quality_pct}' class='vhc-slider'
                      oninput='vhcQualityUpdate(this)'>
@@ -414,9 +422,14 @@ def _render_page(cfg: Config) -> str:
             </div>
             <div>
               <div class='flex items-baseline justify-between mb-1'>
-                <label class='text-sm'>Preset <span class='text-slate-400'>(slower = better compression)</span></label>
+                <label class='text-sm'>Preset</label>
                 <span id='vhc-preset-val' class='font-mono text-slate-100 text-sm'>{e.preset}</span>
               </div>
+              <p class='text-[11px] text-slate-500 mb-2'>
+                How much effort the encoder spends per frame. Slower =
+                marginally smaller files at the same quality. QSV runs
+                <code>veryslow</code> essentially for free on Xe-LP.
+              </p>
               <input type='range' min='0' max='{len(PRESETS) - 1}' step='1'
                      value='{preset_idx}' class='vhc-slider'
                      oninput="vhcPresetUpdate(this)">
@@ -428,9 +441,14 @@ def _render_page(cfg: Config) -> str:
             </div>
             <div>
               <div class='flex items-baseline justify-between mb-1'>
-                <label class='text-sm'>Sharpen <span class='text-slate-400'>(compensate encoder smoothing)</span></label>
+                <label class='text-sm'>Sharpen</label>
                 <span id='vhc-sharpen-val' class='font-mono text-slate-100 text-sm'>{SHARPEN_NAMES[e.sharpen]}</span>
               </div>
+              <p class='text-[11px] text-slate-500 mb-2'>
+                <code>vpp_qsv=detail</code> on the iGPU. Recovers micro-contrast
+                lost to encoder smoothing. Trade-off: too much causes edge
+                halos and amplifies existing noise.
+              </p>
               <input type='range' min='0' max='{len(SHARPEN_NAMES) - 1}' step='1'
                      value='{e.sharpen}' class='vhc-slider'
                      oninput='vhcSharpenUpdate(this)'>
@@ -439,15 +457,52 @@ def _render_page(cfg: Config) -> str:
                 <span>{SHARPEN_NAMES[0]}</span>
                 <span>{SHARPEN_NAMES[-1]}</span>
               </div>
-              <p class='text-[11px] text-slate-500 mt-1'>
-                Uses <code>vpp_qsv=detail</code> on the iGPU — stays inside
-                the full-HW pipeline. Too much causes edge halos.
+            </div>
+            <div>
+              <div class='flex items-baseline justify-between mb-1'>
+                <label class='text-sm'>Denoise</label>
+                <span id='vhc-denoise-val' class='font-mono text-slate-100 text-sm'>{DENOISE_NAMES[e.denoise]}</span>
+              </div>
+              <p class='text-[11px] text-slate-500 mb-2'>
+                <code>vpp_qsv=denoise</code> on the iGPU. Cleans noise on
+                low-quality sources and helps compression. Trade-off: erases
+                film grain \u2014 keep Off / Very light on cherished grainy films.
               </p>
+              <input type='range' min='0' max='{len(DENOISE_NAMES) - 1}' step='1'
+                     value='{e.denoise}' class='vhc-slider'
+                     oninput='vhcDenoiseUpdate(this)'>
+              <input type='hidden' name='denoise' id='vhc-denoise-hidden' value='{e.denoise}'>
+              <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
+                <span>{DENOISE_NAMES[0]}</span>
+                <span>{DENOISE_NAMES[-1]}</span>
+              </div>
+            </div>
+            <div>
+              <div class='flex items-baseline justify-between mb-1'>
+                <label class='text-sm'>Look-ahead depth</label>
+                <span id='vhc-lookahead-val' class='font-mono text-slate-100 text-sm'>{e.look_ahead_depth}</span>
+              </div>
+              <p class='text-[11px] text-slate-500 mb-2'>
+                Encoder peeks N frames ahead before spending bits. Same file
+                size, slightly better quality. Trade-off: only encoding time
+                and iGPU memory \u2014 no playback impact.
+              </p>
+              <input type='range' min='0' max='{len(LOOKAHEAD_STEPS) - 1}' step='1'
+                     value='{LOOKAHEAD_STEPS.index(e.look_ahead_depth) if e.look_ahead_depth in LOOKAHEAD_STEPS else 4}'
+                     class='vhc-slider'
+                     oninput='vhcLookaheadUpdate(this)'>
+              <input type='hidden' name='look_ahead_depth' id='vhc-lookahead-hidden' value='{e.look_ahead_depth}'>
+              <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
+                <span>0 (off)</span>
+                <span>100</span>
+              </div>
             </div>
             <script>
               (function() {{
                 const PRESET_NAMES = {PRESETS!r};
                 const SHARPEN_NAMES = {SHARPEN_NAMES!r};
+                const DENOISE_NAMES = {DENOISE_NAMES!r};
+                const LOOKAHEAD_STEPS = {LOOKAHEAD_STEPS!r};
                 window.vhcPresetUpdate = function(el) {{
                   const name = PRESET_NAMES[parseInt(el.value)];
                   document.getElementById('vhc-preset-val').textContent = name;
@@ -463,6 +518,16 @@ def _render_page(cfg: Config) -> str:
                   const idx = parseInt(el.value);
                   document.getElementById('vhc-sharpen-val').textContent = SHARPEN_NAMES[idx];
                   document.getElementById('vhc-sharpen-hidden').value = idx;
+                }};
+                window.vhcDenoiseUpdate = function(el) {{
+                  const idx = parseInt(el.value);
+                  document.getElementById('vhc-denoise-val').textContent = DENOISE_NAMES[idx];
+                  document.getElementById('vhc-denoise-hidden').value = idx;
+                }};
+                window.vhcLookaheadUpdate = function(el) {{
+                  const depth = LOOKAHEAD_STEPS[parseInt(el.value)];
+                  document.getElementById('vhc-lookahead-val').textContent = depth;
+                  document.getElementById('vhc-lookahead-hidden').value = depth;
                 }};
               }})();
             </script>
@@ -1469,6 +1534,8 @@ def api_settings(
     global_quality: Annotated[int, Form()] = 21,
     preset: Annotated[str, Form()] = "veryslow",
     sharpen: Annotated[int, Form()] = 0,
+    denoise: Annotated[int, Form()] = 0,
+    look_ahead_depth: Annotated[int, Form()] = 80,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1479,6 +1546,10 @@ def api_settings(
         raise HTTPException(400, f"preset must be one of {PRESETS}")
     if not 0 <= sharpen < len(SHARPEN_NAMES):
         raise HTTPException(400, f"sharpen must be 0..{len(SHARPEN_NAMES) - 1}")
+    if not 0 <= denoise < len(DENOISE_NAMES):
+        raise HTTPException(400, f"denoise must be 0..{len(DENOISE_NAMES) - 1}")
+    if not 0 <= look_ahead_depth <= 100:
+        raise HTTPException(400, "look_ahead_depth must be 0-100")
     sweep_at_time = sweep_at_time.strip()
     if sweep_at_time:
         try:
@@ -1492,6 +1563,9 @@ def api_settings(
     cfg.encoder.global_quality = global_quality
     cfg.encoder.preset = preset
     cfg.encoder.sharpen = sharpen
+    cfg.encoder.denoise = denoise
+    cfg.encoder.look_ahead_depth = look_ahead_depth
+    cfg.encoder.look_ahead = look_ahead_depth > 0
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
