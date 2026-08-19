@@ -46,7 +46,7 @@ _COMPOSE_SERVICE = "video-converter"
 
 # Root the folder-picker walks. Everything selectable must be under this path.
 # Overridden by the mock UI to point at a local fake tree.
-_BROWSE_ROOT = "/media"
+_BROWSE_ROOT = os.environ.get("VHC_BROWSE_ROOT", "/media")
 
 try:
     from ruamel.yaml import YAML  # roundtrip preserves comments
@@ -542,6 +542,10 @@ def _render_page(cfg: Config) -> str:
               <input type='checkbox' name='delete_original'
                      {"checked" if r.delete_original else ""}>
               Overwrite original after successful validation
+            </label>
+            <label class='flex items-center gap-2 text-sm'>
+              <input type='checkbox' name='deband' {"checked" if e.deband else ""}>
+              Deband (soften 8-bit banding &mdash; NVENC path only; skipped in QSV full-HW)
             </label>
             <div class='pt-2 border-t border-slate-700'>
               <label class='flex items-center gap-2 text-sm'>
@@ -1554,6 +1558,7 @@ def api_settings(
     denoise: Annotated[int, Form()] = 0,
     look_ahead_depth: Annotated[int, Form()] = 80,
     dynamic_crf: Annotated[str | None, Form()] = None,
+    deband: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1585,6 +1590,7 @@ def api_settings(
     cfg.encoder.look_ahead_depth = look_ahead_depth
     cfg.encoder.look_ahead = look_ahead_depth > 0
     cfg.encoder.dynamic_crf = bool(dynamic_crf)
+    cfg.encoder.deband = bool(deband)
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)

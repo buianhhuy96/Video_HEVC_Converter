@@ -1,11 +1,15 @@
-"""FFmpeg transcode using Intel QSV — full-HW pipeline only.
+"""FFmpeg transcode using Intel QSV (full-HW) or NVIDIA NVENC.
 
-All encodes use `hevc_qsv` with HW decode + HW filter (vpp_qsv) + HW encode.
-Files that aren't compatible (no QSV device) raise `NotSupported` and are
-recorded as *skipped* by `convert.py`. There is no software fallback.
+Encoder is chosen at startup by the `VHC_ENCODER` env var:
+  auto  — QSV if the iGPU device is present, else NVENC if available.
+  qsv   — force Intel QSV full-HW (NAS default).
+  nvenc — force NVIDIA NVENC (Windows PC path).
 
-A progress-based watchdog kills stalled ffmpeg jobs.
-`atomic_replace` preserves mtime & mode and cleans up on cross-device fallbacks.
+QSV path stays in the full-HW pipeline; sharpen/denoise use `vpp_qsv`; deband
+is unsupported. NVENC path uses software filters (unsharp, hqdn3d, gradfun)
+before the encoder — negligible speed cost while NVENC does the encode.
+
+Files that can't be encoded raise `NotSupported` and get recorded as skipped.
 """
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from config import Config
-from probe import HEVC_SAFE_CONTAINERS, VideoInfo, has_qsv_device
+from probe import HEVC_SAFE_CONTAINERS, VideoInfo, has_nvenc, has_qsv_device
 import state
 
 log = logging.getLogger(__name__)
@@ -66,6 +70,18 @@ _VPP_DETAIL_STRENGTHS = {1: 20, 2: 40, 3: 60, 4: 80, 5: 100}
 # also erase film grain, so keep the curve gentler than detail.
 _VPP_DENOISE_STRENGTHS = {1: 5, 2: 15, 3: 30, 4: 50, 5: 80}
 
+# Level → software `unsharp` luma_amount for the NVENC path.
+_SW_SHARPEN_STRENGTHS = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6}
+# Level → software `hqdn3d` params (luma_spatial, chroma_spatial, luma_temp,
+# chroma_temp). Curve mirrors vpp_qsv=denoise for consistent slider feel.
+_SW_DENOISE_PARAMS = {
+    1: "1:0.5:3:3",
+    2: "2:1:4:4",
+    3: "3:1.5:6:6",
+    4: "4:2:8:8",
+    5: "6:3:9:9",
+}
+
 
 def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
     """HW-side filter chain (vpp_qsv). Kept in the full-HW pipeline.
@@ -85,6 +101,21 @@ def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
     if not parts:
         return ""
     return "vpp_qsv=" + ":".join(parts)
+
+
+def _sw_filter_chain(cfg: Config, out_fmt: str) -> str:
+    """Software filter chain for the NVENC path: gradfun + hqdn3d + unsharp."""
+    parts: list[str] = []
+    if cfg.encoder.deband:
+        parts.append("gradfun=1.5:8")
+    denoise = _SW_DENOISE_PARAMS.get(int(cfg.encoder.denoise or 0))
+    if denoise is not None:
+        parts.append(f"hqdn3d={denoise}")
+    sharpen = _SW_SHARPEN_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
+    if sharpen is not None:
+        parts.append(f"unsharp=5:5:{sharpen:.2f}:5:5:0.0")
+    parts.append(f"format={out_fmt}")
+    return ",".join(parts)
 
 
 def _needs_bt709_bsf(info: VideoInfo) -> bool:
@@ -207,6 +238,73 @@ def _build_qsv_cmd(
     return cmd
 
 
+def _build_nvenc_cmd(
+    src: Path, dst: Path, info: VideoInfo, cfg: Config,
+) -> list[str]:
+    """Software decode + software filters + NVIDIA NVENC encode."""
+    enc = cfg.encoder
+    ten_bit = enc.allow_10bit
+    out_ext = dst.suffix.lower()
+    pix_fmt = "p010le" if ten_bit else "yuv420p"
+
+    cmd: list[str] = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-loglevel", "warning",
+        "-i", str(src),
+    ]
+    cmd += _stream_map_args(cfg, info)
+    cmd += ["-filter:v:0", _sw_filter_chain(cfg, pix_fmt)]
+    cmd += [
+        "-c:v", "hevc_nvenc",
+        # p1..p7 = fastest..slowest; p7 is NVENC's veryslow-equivalent.
+        "-preset", "p7",
+        "-tune", "hq",
+        "-rc", "vbr",
+        "-cq", str(enc.global_quality),
+        "-b:v", "0",  # cq mode ignores b:v but ffmpeg needs it set to 0.
+        "-pix_fmt", pix_fmt,
+        # Better motion prediction and reference reuse (mirrors QSV knobs).
+        "-bf", "4",
+        "-b_ref_mode", "middle",
+        "-refs", "4",
+        "-multipass", "fullres",
+        "-spatial-aq", "1",
+        "-temporal-aq", "1",
+        "-aq-strength", "8",
+    ]
+    if enc.look_ahead and enc.look_ahead_depth > 0:
+        cmd += ["-rc-lookahead", str(enc.look_ahead_depth)]
+    if enc.max_bitrate_kbps > 0:
+        cmd += [
+            "-maxrate", f"{enc.max_bitrate_kbps}k",
+            "-bufsize", f"{enc.max_bitrate_kbps * 2}k",
+        ]
+
+    cmd += _common_output_args(out_ext, cfg, info)
+    cmd += [str(dst)]
+    return cmd
+
+
+# Which encoder the process will use. Read once at import so the choice is
+# stable for the lifetime of the container / process.
+def _select_encoder() -> str:
+    forced = os.environ.get("VHC_ENCODER", "auto").lower().strip()
+    if forced == "qsv":
+        return "qsv"
+    if forced == "nvenc":
+        return "nvenc"
+    if forced not in ("auto", ""):
+        log.warning("VHC_ENCODER=%r not recognised; using auto", forced)
+    if has_qsv_device():
+        return "qsv"
+    if has_nvenc():
+        return "nvenc"
+    return "qsv"  # will fail at transcode time with a clear message
+
+
+_ENCODER = _select_encoder()
+
+
 def transcode(info: VideoInfo, cfg: Config) -> Path:
     """Encode `info.path` into a temp file and return its path."""
     src = info.path
@@ -218,8 +316,19 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
     if dst.exists():
         dst.unlink()
 
-    if not has_qsv_device():
-        raise NotSupported("QSV device (/dev/dri/renderD128) not available")
+    if _ENCODER == "qsv":
+        if not has_qsv_device():
+            raise NotSupported("QSV device (/dev/dri/renderD128) not available")
+        # QSV path stays in full-HW: deband would need software gradfun.
+        if cfg.encoder.deband:
+            raise NotSupported(
+                "Deband requires software filters; incompatible with QSV full-HW"
+            )
+    elif _ENCODER == "nvenc":
+        if not has_nvenc():
+            raise NotSupported("hevc_nvenc not available in this ffmpeg build")
+    else:
+        raise NotSupported(f"unknown encoder backend: {_ENCODER!r}")
 
     # Dynamic CRF: override the base value with a per-size ladder for this
     # one encode so bigger sources (usually less-efficiently pre-encoded) get
@@ -240,7 +349,12 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
                 cfg, encoder=dc_replace(cfg.encoder, global_quality=eff_crf)
             )
 
-    cmd = _build_qsv_cmd(src, dst, info, cfg)
+    if _ENCODER == "qsv":
+        cmd = _build_qsv_cmd(src, dst, info, cfg)
+        label = "QSV full-HW"
+    else:
+        cmd = _build_nvenc_cmd(src, dst, info, cfg)
+        label = "NVENC"
 
     enc_cfg = cfg.encoder
     params = (
@@ -249,9 +363,9 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
         f"10bit={enc_cfg.allow_10bit} "
         f"look_ahead={enc_cfg.look_ahead}({enc_cfg.look_ahead_depth}) "
         f"sharpen={enc_cfg.sharpen} denoise={enc_cfg.denoise}"
+        f" deband={enc_cfg.deband}"
         + (" auto_crf=on" if cfg.encoder.dynamic_crf else "")
     )
-    label = "QSV full-HW"
 
     if state.stop_requested():
         raise RuntimeError("stopped by user")

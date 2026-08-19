@@ -181,6 +181,27 @@ def has_qsv_device() -> bool:
     return _QSV_AVAILABLE
 
 
+def has_nvenc() -> bool:
+    """True if ffmpeg on PATH advertises the hevc_nvenc encoder."""
+    return _NVENC_AVAILABLE
+
+
 _QSV_AVAILABLE: bool = (
     Path("/dev/dri/renderD128").exists() and shutil.which("ffmpeg") is not None
 )
+
+
+def _detect_nvenc() -> bool:
+    if not shutil.which("ffmpeg"):
+        return False
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return "hevc_nvenc" in res.stdout
+
+
+_NVENC_AVAILABLE: bool = _detect_nvenc()
