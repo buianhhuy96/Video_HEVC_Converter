@@ -81,31 +81,35 @@ def validate(
             )
 
     if cfg.full_decode:
-        # Full decode: every packet must decode without error. Try QSV first
-        # (uses the iGPU's fixed-function decoder — an order of magnitude
-        # faster than software), then fall back to software if QSV isn't
-        # usable for this file.
+        # Decode independently in software. Validating a QSV encode with the
+        # same QSV driver can accept bitstreams that fail in other players.
         # rc alone is not enough: ffmpeg's stream demuxer will happily hit
         # EOF on a truncated file with rc=0 even if only 3 minutes of a
         # 2-hour source made it into the container. So we also demand the
         # decoded out_time reach at least (source duration - tolerance).
-        base = ["ffmpeg", "-nostdin", "-v", "error", "-xerror"]
-        tail = ["-i", str(new_path), "-progress", "pipe:1", "-f", "null", "-"]
-        last_progress: dict[str, str] = {}
-        for accel in (["-hwaccel", "qsv"], []):
-            cmd = base + accel + tail
-            rc, stderr, last_progress = _run_full_decode(cmd, progress_cb)
-            if rc == 0:
-                break
-            if accel:
-                log.info("full-decode: QSV path failed (rc=%d), retrying in software", rc)
-                continue
+        cmd = [
+            "ffmpeg", "-nostdin", "-v", "error", "-xerror",
+            "-err_detect", "explode",
+            "-i", str(new_path),
+            "-map", "0:v:0",
+            "-progress", "pipe:1", "-f", "null", "-",
+        ]
+        rc, stderr, last_progress = _run_full_decode(cmd, progress_cb)
+        if rc != 0:
             raise ValidationError(
                 f"full-decode failed: rc={rc} stderr={stderr.strip()[:400]}"
             )
+
+        if last_progress.get("progress") != "end":
+            raise ValidationError("full-decode ended without a completion marker")
+
         # Truncation check: how much of the file actually decoded?
         decoded_s = _parse_out_time(last_progress.get("out_time"))
-        if decoded_s is not None and original.duration > 0:
+        if decoded_s is None:
+            raise ValidationError(
+                "full-decode did not report a measurable completion timestamp"
+            )
+        if original.duration > 0:
             gap = original.duration - decoded_s
             if gap > cfg.duration_tolerance_seconds:
                 raise ValidationError(
@@ -163,7 +167,7 @@ def _run_full_decode(
             except Exception:  # noqa: BLE001
                 log.exception("validation progress_cb raised")
     proc.wait()
-    t.join(timeout=1)
+    t.join()
     return proc.returncode, "".join(stderr_lines), progress
 
 
@@ -185,6 +189,7 @@ def precheck_source(src: Path, info: VideoInfo, sample_seconds: int = 30) -> Non
     start = max(0.0, info.duration / 2 - sample_seconds / 2)
     cmd = [
         "ffmpeg", "-nostdin", "-v", "error", "-xerror",
+        "-err_detect", "explode",
         "-ss", f"{start:.2f}",
         "-i", str(src),
         "-t", str(sample_seconds),

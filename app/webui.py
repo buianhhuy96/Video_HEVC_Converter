@@ -87,10 +87,13 @@ def _load() -> Config:
     return load_config(_config_path)
 
 
-def _fmt_bytes(n: int | float | None) -> str:
-    if not n:
+def _fmt_bytes(n: int | float | str | None) -> str:
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
         return "—"
-    n = float(n)
+    if n <= 0 or not math.isfinite(n):
+        return "—"
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if n < 1024:
             return f"{n:.1f} {unit}"
@@ -539,7 +542,7 @@ def _render_page(cfg: Config) -> str:
               <label class='block text-sm mb-1'>
                 Daily sweep time <span class='text-slate-400'>(HH:MM 24-hour local — empty = manual only)</span>
               </label>
-              <input type='text' name='sweep_at_time' pattern='^([01]\d|2[0-3]):[0-5]\d$|^$'
+              <input type='text' name='sweep_at_time' pattern='^([01]\\d|2[0-3]):[0-5]\\d$|^$'
                      value='{r.sweep_at_time}' placeholder='03:00' class='w-32'>
             </div>
             <label class='flex items-center gap-2 text-sm'>
@@ -620,7 +623,7 @@ def _render_page(cfg: Config) -> str:
       </div>
 
       <section class='card'>
-        <h2 class='font-semibold mb-3 text-lg'>Current encode</h2>
+        <h2 class='font-semibold mb-3 text-lg'>Current conversion</h2>
         <div id='progress' hx-get='/api/progress' hx-trigger='load, every 2s'>…</div>
       </section>
     </section>
@@ -1037,8 +1040,9 @@ def _render_progress() -> str:
         if cur["stage"] == "validating":
             stage_hint = (
                 "<p class='text-xs text-amber-400'>"
-                "Full-decoding the output to catch corruption. Uses the iGPU "
-                "when possible — expect a minute or two on large 4K files."
+                "Safety pass: independently software-decoding the complete output "
+                "before the original can be replaced. This can run much faster "
+                "than encoding."
                 "</p>"
             )
         elif cur["stage"] == "replacing":
@@ -1089,7 +1093,7 @@ def _render_progress() -> str:
             <div class='bg-slate-900 rounded p-3'>
               <div class='text-xs text-slate-400'>Output size so far</div>
               <div class='text-lg font-semibold text-slate-100'>
-                {_fmt_bytes(int(p.get("total_size", 0) or 0))}
+                {_fmt_bytes(p.get("total_size"))}
               </div>
             </div>
           </div>
