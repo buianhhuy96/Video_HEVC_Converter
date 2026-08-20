@@ -194,6 +194,10 @@ def _build_qsv_cmd(
         "-filter_hw_device", "hw",
         "-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
         "-i", str(src),
+        # Passthrough source frame timing. QSV+hwaccel can otherwise write
+        # wrong duration metadata into the output container (players see a
+        # 2-minute file for a 2-hour encode).
+        "-fps_mode", "passthrough",
     ]
     cmd += _stream_map_args(cfg, info)
 
@@ -233,11 +237,6 @@ def _build_qsv_cmd(
     return cmd
 
 
-    cmd += _common_output_args(out_ext, cfg, info)
-    cmd += [str(dst)]
-    return cmd
-
-
 def _build_nvenc_cmd(
     src: Path, dst: Path, info: VideoInfo, cfg: Config,
 ) -> list[str]:
@@ -251,6 +250,7 @@ def _build_nvenc_cmd(
         "ffmpeg", "-hide_banner", "-y",
         "-loglevel", "warning",
         "-i", str(src),
+        "-fps_mode", "passthrough",
     ]
     cmd += _stream_map_args(cfg, info)
     cmd += ["-filter:v:0", _sw_filter_chain(cfg, pix_fmt)]
