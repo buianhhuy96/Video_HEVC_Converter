@@ -21,20 +21,25 @@ class EncoderCfg:
     global_quality: int = 18
     preset: str = "veryslow"
     look_ahead: bool = True
-    look_ahead_depth: int = 80
+    look_ahead_depth: int = 60
     allow_10bit: bool = True
     max_bitrate_kbps: int = 0
     preserve_color_metadata: bool = True
     # 0 = off; 1..5 map to vpp_qsv=detail=N on the QSV path.
-    sharpen: int = 0
+    sharpen: int = 2
     # 0 = off; 1..5 map to vpp_qsv=denoise=N on the QSV path.
-    denoise: int = 0
+    denoise: int = 1
     # Software deband (`gradfun`) before the encoder. QSV path rejects this
     # (would break full-HW); NVENC path applies it.
     deband: bool = False
     # When true, pick CRF from a source-size ladder (bigger = more aggressive).
     # Falls back to `global_quality` below the smallest threshold.
     dynamic_crf: bool = False
+    # Force constant-frame-rate output (-fps_mode cfr). Workaround for QSV
+    # pipeline bugs that leak broken source PTS into the encoded container
+    # (symptom: 2h source produces a file whose header says 2h but only the
+    # first N minutes are playable). Off = -fps_mode passthrough.
+    fixed_frame_rate: bool = True
 
 
 @dataclass

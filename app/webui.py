@@ -550,6 +550,11 @@ def _render_page(cfg: Config) -> str:
               <input type='checkbox' name='deband' {"checked" if e.deband else ""}>
               Deband (soften 8-bit banding &mdash; NVENC path only; skipped in QSV full-HW)
             </label>
+            <label class='flex items-center gap-2 text-sm'
+                   title='Regenerates output timestamps at a constant rate. Workaround for QSV pipeline bugs where a long source produces a file whose header says the right duration but only the first few minutes play.'>
+              <input type='checkbox' name='fixed_frame_rate' {"checked" if e.fixed_frame_rate else ""}>
+              Fixed frame rate <span class='text-slate-500'>(recommended — avoids QSV timing bugs)</span>
+            </label>
             <div class='pt-2 border-t border-slate-700'>
               <label class='flex items-center gap-2 text-sm'>
                 <input type='checkbox' name='dynamic_crf'
@@ -684,6 +689,7 @@ def _render_pending() -> str:
     return _render_pending_table(
         state.get_pending(),
         "No files queued. Click <b>Scan now</b> to find candidates.",
+        removable=True,
     )
 
 
@@ -760,7 +766,9 @@ def _legend_row(label: str, value: str, color: str) -> str:
     )
 
 
-def _render_pending_table(items: list[dict], empty_msg: str) -> str:
+def _render_pending_table(
+    items: list[dict], empty_msg: str, *, removable: bool = False,
+) -> str:
     """Shared renderer for the Pending / Up-next tables."""
     if not items:
         return f"<div class='text-slate-400 text-sm'>{empty_msg}</div>"
@@ -771,6 +779,7 @@ def _render_pending_table(items: list[dict], empty_msg: str) -> str:
         f"<b>{len(items)}</b> file(s) · total <b>{_fmt_bytes(total_bytes)}</b>"
         "</div>"
     )
+    action_th = "<th class='py-1 pr-3 w-6'></th>" if removable else ""
     thead = (
         "<thead><tr class='text-xs text-slate-400 text-left "
         "border-b border-slate-600'>"
@@ -779,11 +788,24 @@ def _render_pending_table(items: list[dict], empty_msg: str) -> str:
         "<th class='py-1 pr-3'>Resolution</th>"
         "<th class='py-1 pr-3'>Duration</th>"
         "<th class='py-1 pr-3'>Size</th>"
+        f"{action_th}"
         "</tr></thead>"
     )
     rows = []
     for it in items[:100]:
         res = f"{it.get('width', 0)}\u00d7{it.get('height', 0)}"
+        remove_cell = ""
+        if removable:
+            p = _esc(it.get("path", ""))
+            remove_cell = (
+                "<td class='py-1 pr-3 text-right'>"
+                f"<button type='button' class='text-red-400 hover:text-red-300 px-1' "
+                f"title='Exclude this file from conversion' "
+                f"hx-post='/api/pending/remove' hx-vals='{{\"path\": \"{p}\"}}' "
+                f"hx-target='#pending' hx-swap='innerHTML'"
+                ">&times;</button>"
+                "</td>"
+            )
         rows.append(
             "<tr class='border-b border-slate-700'>"
             f"<td class='py-1 pr-3 font-mono text-xs text-cyan-300 truncate max-w-md'>"
@@ -792,6 +814,7 @@ def _render_pending_table(items: list[dict], empty_msg: str) -> str:
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{res}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{_fmt_duration(it.get('duration'))}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{_fmt_bytes(it.get('size'))}</td>"
+            f"{remove_cell}"
             "</tr>"
         )
     footer = ""
@@ -1554,6 +1577,14 @@ def api_pending(_: Auth) -> str:
     return _render_pending()
 
 
+@app.post("/api/pending/remove", response_class=HTMLResponse)
+def api_pending_remove(
+    _: Auth, path: Annotated[str, Form()],
+) -> str:
+    state.remove_pending(path)
+    return _render_pending()
+
+
 @app.post("/api/settings", response_model=None)
 def api_settings(
     request: Request,
@@ -1562,9 +1593,10 @@ def api_settings(
     preset: Annotated[str, Form()] = "veryslow",
     sharpen: Annotated[int, Form()] = 0,
     denoise: Annotated[int, Form()] = 0,
-    look_ahead_depth: Annotated[int, Form()] = 80,
+    look_ahead_depth: Annotated[int, Form()] = 60,
     dynamic_crf: Annotated[str | None, Form()] = None,
     deband: Annotated[str | None, Form()] = None,
+    fixed_frame_rate: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
@@ -1597,6 +1629,7 @@ def api_settings(
     cfg.encoder.look_ahead = look_ahead_depth > 0
     cfg.encoder.dynamic_crf = bool(dynamic_crf)
     cfg.encoder.deband = bool(deband)
+    cfg.encoder.fixed_frame_rate = bool(fixed_frame_rate)
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)

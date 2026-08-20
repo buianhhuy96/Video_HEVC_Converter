@@ -93,8 +93,22 @@ encoder:
   preset: veryslow
 
   # Lookahead improves quality on scene changes. Depth in frames (max 100).
+  # 60 is a safer default on Xe-LP iGPUs; 80+ can exhaust the driver's
+  # surface-buffer pool on 4K sources and produce truncated output.
   look_ahead: true
-  look_ahead_depth: 80
+  look_ahead_depth: 60
+
+  # HW post-processing filters on the QSV path. 0 = off, 1..5 = intensity.
+  # Sharpen restores micro-contrast lost to encoder smoothing; denoise
+  # cleans noisy sources at the cost of erasing film grain.
+  sharpen: 2
+  denoise: 1
+
+  # Regenerate output timestamps at a constant frame rate. Workaround for
+  # QSV pipeline bugs where a long source produces a container whose header
+  # says the correct duration but only the first N minutes are playable.
+  # Set to false to preserve source PTS verbatim (needed for true VFR sources).
+  fixed_frame_rate: true
 
   # Emit 10-bit HEVC (main10) for every source when true. Preserves 10-bit
   # sources and avoids encoder-introduced banding on 8-bit sources at the
