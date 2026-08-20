@@ -44,6 +44,19 @@ _pending_lock = threading.Lock()
 # Each entry: {path, codec, width, height, duration, size, bit_depth}
 _pending: list[dict] = []
 
+_all_media_lock = threading.Lock()
+# Superset of _pending: every video file the scanner found, including
+# HEVC / raw / off-spec ones. Each entry adds `needs_convert: bool` and
+# `skip_reason: str | None` on top of the pending fields. Used by the
+# Rename tab and library-overview widgets.
+_all_media: list[dict] = []
+
+_rename_lock = threading.Lock()
+# Rename tab: nested tree of folder/file nodes generated from _all_media.
+# Empty dict means "no batch". Mutated per-row as the user edits proposed
+# names in the UI; consumed by "Apply".
+_rename_tree: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Actions (scan / convert / shutdown wake)
@@ -197,3 +210,61 @@ def clear_pending() -> None:
 def remove_pending(path: str) -> None:
     with _pending_lock:
         _pending[:] = [x for x in _pending if x.get("path") != path]
+
+
+# ---------------------------------------------------------------------------
+# All media list (populated by discovery, consumed by Rename / library widgets)
+# ---------------------------------------------------------------------------
+def set_all_media(items: list[dict]) -> None:
+    with _all_media_lock:
+        _all_media.clear()
+        _all_media.extend(items)
+
+
+def get_all_media() -> list[dict]:
+    with _all_media_lock:
+        return [dict(x) for x in _all_media]
+
+
+def all_media_count() -> int:
+    with _all_media_lock:
+        return len(_all_media)
+
+
+def clear_all_media() -> None:
+    with _all_media_lock:
+        _all_media.clear()
+
+
+# ---------------------------------------------------------------------------
+# Rename tab preview tree
+# ---------------------------------------------------------------------------
+def set_rename_tree(tree: dict) -> None:
+    with _rename_lock:
+        _rename_tree.clear()
+        _rename_tree.update(tree)
+
+
+def get_rename_tree() -> dict:
+    with _rename_lock:
+        # Shallow copy — callers who mutate `children` will still affect
+        # the stored tree, so callers that need isolation should deep-copy.
+        return dict(_rename_tree)
+
+
+def clear_rename_tree() -> None:
+    with _rename_lock:
+        _rename_tree.clear()
+
+
+def update_rename_node(node_id: str, **fields) -> bool:
+    """Merge `fields` into the tree node with the given id. Returns True on hit."""
+    from rename import find_node  # local import to avoid cycle at module load
+    with _rename_lock:
+        if not _rename_tree:
+            return False
+        node = find_node(_rename_tree, node_id)
+        if node is None:
+            return False
+        node.update(fields)
+        return True

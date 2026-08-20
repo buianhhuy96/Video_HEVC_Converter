@@ -372,6 +372,7 @@ def _render_page(cfg: Config) -> str:
     <nav class='tabs-nav flex gap-1 border-b border-slate-700 mb-6'>
       <button data-tab='setup'   class='tab tab-active'>Setup</button>
       <button data-tab='convert' class='tab'>Convert</button>
+      <button data-tab='rename'  class='tab'>Rename</button>
       <button data-tab='status'  class='tab'>Status</button>
     </nav>
 
@@ -624,7 +625,39 @@ def _render_page(cfg: Config) -> str:
       </section>
     </section>
 
-    <!-- ==================== TAB 3: STATUS ==================== -->
+    <!-- ==================== TAB 3: RENAME ==================== -->
+    <section id='tab-rename' class='tab-content space-y-6 hidden'>
+      <div class='flex items-center gap-3 flex-wrap'>
+        <button class='btn btn-primary'
+                hx-post='/api/rename/generate' hx-target='#rename-preview' hx-swap='innerHTML'
+                title='Read all_media and generate canonical Jellyfin names'>
+          Generate suggestions
+        </button>
+        <button class='btn btn-primary'
+                hx-post='/api/rename/apply'
+                hx-confirm='Apply all included renames? Subtitles alongside will move too. This can be reversed once via Undo last.'
+                hx-target='#rename-preview' hx-swap='innerHTML'>
+          Apply renames
+        </button>
+        <button class='btn btn-ghost'
+                hx-post='/api/rename/undo'
+                hx-confirm='Undo the most recent Apply batch?'
+                hx-target='#rename-preview' hx-swap='innerHTML'>
+          Undo last
+        </button>
+        <span class='text-slate-400 text-sm'>
+          Suggestions are proposals only \u2014 review, uncheck rows you don't
+          want, edit any name inline, then Apply. A single Undo reverses the
+          last Apply batch.
+        </span>
+      </div>
+
+      <section class='card'>
+        <div id='rename-preview' hx-get='/api/rename/preview' hx-trigger='load'>\u2026</div>
+      </section>
+    </section>
+
+    <!-- ==================== TAB 4: STATUS ==================== -->
     <section id='tab-status' class='tab-content space-y-6 hidden'>
       <div class='flex items-center justify-between'>
         <h2 class='font-semibold text-lg'>Library status</h2>
@@ -690,6 +723,7 @@ def _render_pending() -> str:
         state.get_pending(),
         "No files queued. Click <b>Scan now</b> to find candidates.",
         removable=True,
+        library_total=state.all_media_count(),
     )
 
 
@@ -767,16 +801,31 @@ def _legend_row(label: str, value: str, color: str) -> str:
 
 
 def _render_pending_table(
-    items: list[dict], empty_msg: str, *, removable: bool = False,
+    items: list[dict], empty_msg: str, *,
+    removable: bool = False, library_total: int | None = None,
 ) -> str:
     """Shared renderer for the Pending / Up-next tables."""
     if not items:
+        if library_total:
+            return (
+                f"<div class='text-slate-400 text-sm'>{empty_msg}</div>"
+                f"<div class='text-xs text-slate-500 mt-2'>"
+                f"Library scanned: <b class='text-slate-300'>{library_total}</b> "
+                f"file(s) — nothing needs conversion.</div>"
+            )
         return f"<div class='text-slate-400 text-sm'>{empty_msg}</div>"
 
     total_bytes = sum(int(x.get("size") or 0) for x in items)
+    lib_frag = ""
+    if library_total and library_total >= len(items):
+        lib_frag = (
+            f" · <span class='text-slate-400'>"
+            f"{len(items)} of {library_total} in library need conversion</span>"
+        )
     header = (
         "<div class='text-slate-300 text-sm mb-3'>"
         f"<b>{len(items)}</b> file(s) · total <b>{_fmt_bytes(total_bytes)}</b>"
+        f"{lib_frag}"
         "</div>"
     )
     action_th = "<th class='py-1 pr-3 w-6'></th>" if removable else ""
@@ -1583,6 +1632,502 @@ def api_pending_remove(
 ) -> str:
     state.remove_pending(path)
     return _render_pending()
+
+
+# ---------------------------------------------------------------------------
+# Rename tab
+# ---------------------------------------------------------------------------
+def _rename_log_path(cfg: Config) -> Path:
+    """JSONL log next to the state DB so Apply/Undo persist across restarts."""
+    return Path(cfg.runtime.state_db).with_name("renames.log")
+
+
+@app.get("/api/rename/preview", response_class=HTMLResponse)
+def api_rename_preview(_: Auth) -> str:
+    return _render_rename(_load())
+
+
+@app.post("/api/rename/generate", response_class=HTMLResponse)
+def api_rename_generate(_: Auth) -> str:
+    from rename import build_tree
+    items = state.get_all_media()
+    tree = build_tree(items)
+    state.set_rename_tree(tree)
+    return _render_rename(_load())
+
+
+@app.post("/api/rename/apply", response_class=HTMLResponse)
+def api_rename_apply(_: Auth) -> str:
+    from rename import apply_tree
+    cfg = _load()
+    tree = state.get_rename_tree()
+    if not tree:
+        return _render_rename(cfg, banner=(
+            "<span class='text-amber-300'>Nothing to apply \u2014 "
+            "click <b>Generate suggestions</b> first.</span>"
+        ))
+    summary = apply_tree(tree, _rename_log_path(cfg))
+    log.info(
+        "rename: applied %d, failed %d, log=%s",
+        summary["applied"], summary["failed"], _rename_log_path(cfg),
+    )
+    state.clear_rename_tree()
+    banner = (
+        f"<span class='text-emerald-400'>Applied {summary['applied']} "
+        f"rename(s).</span>"
+    )
+    if summary["failed"]:
+        banner += (
+            f" <span class='text-red-400'>{summary['failed']} failed \u2014 "
+            "see logs.</span>"
+        )
+    return _render_rename(cfg, banner=banner)
+
+
+@app.post("/api/rename/undo", response_class=HTMLResponse)
+def api_rename_undo(_: Auth) -> str:
+    from rename import undo_last
+    cfg = _load()
+    summary = undo_last(_rename_log_path(cfg))
+    if summary["ok"]:
+        banner = (
+            f"<span class='text-emerald-400'>Undid last batch \u2014 "
+            f"{summary['reverted']} file(s) reverted.</span>"
+        )
+    else:
+        err = summary.get("error") or f"{len(summary.get('failures', []))} failure(s)"
+        banner = f"<span class='text-red-400'>Undo problem: {_esc(err)}</span>"
+    return _render_rename(cfg, banner=banner)
+
+
+@app.post("/api/rename/edit", response_class=HTMLResponse)
+def api_rename_edit(
+    _: Auth,
+    node_id: Annotated[str, Form()],
+    proposed: Annotated[str | None, Form()] = None,
+    field: Annotated[str | None, Form()] = None,
+    value: Annotated[str | None, Form()] = None,
+) -> str:
+    """Update a node.
+
+    Two modes: freeform (folder rows send `proposed=<new name>`) or
+    structured (file rows send `field=<title|year|...>` + `value=<...>`,
+    and the server rebuilds the full filename from the parts).
+    """
+    if field is not None:
+        from rename import find_node, rebuild_proposed
+        tree = state.get_rename_tree()
+        node = find_node(tree, node_id) if tree else None
+        if node is None:
+            return ""
+        parts = dict(node.get("parts") or {})
+        parts[field] = value or ""
+        new_proposed = rebuild_proposed(
+            parts, node.get("ext", ""), node["name"],
+        )
+        state.update_rename_node(node_id, parts=parts, proposed=new_proposed)
+    elif proposed is not None:
+        state.update_rename_node(node_id, proposed=proposed)
+    return ""  # HTMX hx-swap='none' consumer
+
+
+@app.post("/api/rename/add_folder", response_class=HTMLResponse)
+def api_rename_add_folder(
+    _: Auth,
+    sibling_id: Annotated[str, Form()],
+) -> str:
+    """Insert an empty user-created folder as a sibling above `sibling_id`."""
+    from rename import insert_folder_above
+    tree = state.get_rename_tree()
+    if not tree:
+        return _render_rename(_load())
+    insert_folder_above(tree, sibling_id)
+    state.set_rename_tree(tree)
+    return _render_rename(_load())
+
+
+@app.post("/api/rename/split_at", response_class=HTMLResponse)
+def api_rename_split_at(
+    _: Auth,
+    node_id: Annotated[str, Form()],
+    target_depth: Annotated[int, Form()],
+) -> str:
+    """Create a new folder at `target_depth` and adopt the clicked row + siblings."""
+    from rename import split_at_ancestor
+    tree = state.get_rename_tree()
+    if not tree:
+        return _render_rename(_load())
+    split_at_ancestor(tree, node_id, target_depth)
+    state.set_rename_tree(tree)
+    return _render_rename(_load())
+
+
+@app.post("/api/rename/delete_new_folder", response_class=HTMLResponse)
+def api_rename_delete_new_folder(
+    _: Auth,
+    node_id: Annotated[str, Form()],
+) -> str:
+    """Remove a user-created folder; its children are re-adopted by its parent."""
+    from rename import delete_new_folder
+    tree = state.get_rename_tree()
+    if not tree:
+        return _render_rename(_load())
+    delete_new_folder(tree, node_id)
+    state.set_rename_tree(tree)
+    return _render_rename(_load())
+
+
+def _confidence_badge(conf: str | None) -> str:
+    """Traffic-light dot for a node's parser confidence."""
+    if not conf:
+        return ""
+    color = {
+        "high": "bg-emerald-400",
+        "medium": "bg-amber-400",
+        "low": "bg-red-500",
+    }.get(conf, "bg-slate-500")
+    return (
+        f"<span class='inline-block w-2.5 h-2.5 rounded-full {color}' "
+        f"title='{_esc(conf)} confidence'></span>"
+    )
+
+
+def _proposed_input(node: dict, is_root: bool) -> str:
+    """Right-column editor for a node.
+
+    Folders (and the root) get one input holding the full folder name.
+    Files get three inputs: [Title] | [Year or SxxExx] | [Version or
+    Episode title]. The middle box drives which format the proposed
+    filename gets on save (year → Movie; SxxExx → TV; anything else is
+    appended verbatim).
+    """
+    node_id = _esc(node["id"])
+    readonly = "readonly" if is_root else ""
+    input_cls = (
+        "w-full font-mono text-xs bg-slate-900 "
+        + ("text-slate-500" if is_root else "text-cyan-300")
+        + " border border-slate-700 rounded px-2 py-1"
+    )
+
+    def one_full(value: str) -> str:
+        return (
+            f"<input type='text' value='{_esc(value)}' {readonly} "
+            f"class='{input_cls}' "
+            f"hx-post='/api/rename/edit' hx-swap='none' "
+            f"hx-trigger='change delay:400ms' "
+            f"hx-vals='{{\"node_id\": \"{node_id}\"}}' "
+            f"name='proposed'>"
+        )
+
+    def one_part(field: str, value: str, placeholder: str) -> str:
+        return (
+            f"<input type='text' value='{_esc(value)}' "
+            f"placeholder='{_esc(placeholder)}' class='{input_cls}' "
+            f"hx-post='/api/rename/edit' hx-swap='none' "
+            f"hx-trigger='change delay:400ms' "
+            f"hx-vals='{{\"node_id\": \"{node_id}\", \"field\": \"{field}\"}}' "
+            f"name='value'>"
+        )
+
+    if node["type"] == "folder" or is_root:
+        return one_full(node["proposed"])
+
+    parts = node.get("parts") or {}
+    return (
+        "<div class='grid grid-cols-[1fr_110px_1fr] gap-1'>"
+        + one_part("title", parts.get("title", ""), "Title / Show name")
+        + one_part("middle", parts.get("middle", ""), "Year or S01E01")
+        + one_part("right", parts.get("right", ""), "Version / Episode title")
+        + "</div>"
+    )
+
+
+def _depth_plus_buttons(node_id: str, depth: int) -> str:
+    """Render `depth` plus buttons, one per ancestor level.
+
+    Each button is a 20px slot; clicking button K (1-indexed) creates a new
+    folder at level K and adopts the row's ancestor at level K+1 (plus any
+    subsequent siblings). At the row's own level, it adopts the row itself
+    and all following siblings.
+    """
+    if depth <= 0:
+        return ""
+    parts: list[str] = []
+    esc_id = _esc(node_id)
+    for k in range(1, depth + 1):
+        parts.append(
+            f"<button type='button' class='vhc-plus-btn' "
+            f"title='Insert new folder at this level' "
+            f"hx-post='/api/rename/split_at' "
+            f"hx-vals='{{\"node_id\": \"{esc_id}\", \"target_depth\": {k}}}' "
+            f"hx-target='#rename-preview' hx-swap='innerHTML'>+</button>"
+        )
+    return "".join(parts)
+
+
+def _depth_indent_spacer(depth: int) -> str:
+    """Invisible mirror of the plus grid for the Proposed column indent."""
+    if depth <= 0:
+        return ""
+    return f"<span class='inline-block' style='width:{depth * 20}px'></span>"
+
+
+def _render_tree_node(node: dict, depth: int = 0, index_in_parent: int = 0) -> str:
+    """Render one folder or file row. Recurses into folder children."""
+    is_root = node.get("is_root") is True
+    is_new = node.get("is_new") is True
+    node_id = _esc(node["id"])
+
+    if node["type"] == "folder":
+        icon = "\U0001f4c1"  # 📁
+    else:
+        icon = "\U0001f3ac"  # 🎬
+
+    current_label = _esc(node["name"]) or (
+        "<span class='text-slate-500 italic'>library root</span>" if is_root else ""
+    )
+    if is_root and not node["name"]:
+        current_label = (
+            f"<span class='text-slate-500 italic'>root:</span> "
+            f"<span class='font-mono text-xs text-slate-400'>"
+            f"{_esc(node.get('path', ''))}</span>"
+        )
+    elif is_new:
+        current_label = (
+            "<span class='text-emerald-400 italic'>(new folder)</span>"
+        )
+    conf_badge = _confidence_badge(node.get("confidence"))
+    note_html = ""
+    if node.get("note"):
+        note_html = (
+            f"<div class='text-[11px] text-amber-300 mt-0.5 ml-1'>"
+            f"\u26a0 {_esc(node['note'])}</div>"
+        )
+
+    changed = (
+        (node["name"] != node["proposed"] and not is_root)
+        or is_new
+    )
+    row_bg = "bg-slate-800/40" if changed else ""
+
+    plus_grid = _depth_plus_buttons(node_id, depth)
+    right_indent = _depth_indent_spacer(depth)
+
+    delete_btn = ""
+    if is_new:
+        delete_btn = (
+            f"<button type='button' title='Delete this new folder' "
+            f"class='text-slate-500 hover:text-red-300 px-1 ml-1 leading-none text-sm' "
+            f"hx-post='/api/rename/delete_new_folder' "
+            f"hx-vals='{{\"node_id\": \"{node_id}\"}}' "
+            f"hx-target='#rename-preview' hx-swap='innerHTML'>\u00d7</button>"
+        )
+
+    row = (
+        f"<div class='vhc-rename-row grid gap-3 py-1 border-b border-slate-800 "
+        f"{row_bg} items-start'>"
+        # COL 1: confidence dot
+        f"<div class='pt-1.5 flex justify-center'>{conf_badge}</div>"
+        # COL 2: depth pluses + icon + current name + (delete if new)
+        f"<div class='flex items-center gap-0 min-w-0'>"
+        f"{plus_grid}"
+        f"<span class='text-slate-500 text-sm ml-1'>{icon}</span>"
+        f"<div class='min-w-0 flex-1 ml-1'>"
+        f"<div class='font-mono text-xs text-slate-300 truncate'>{current_label}</div>"
+        f"</div>"
+        f"{delete_btn}"
+        f"</div>"
+        # COL 3: indent spacer + icon + editable proposed
+        f"<div class='flex items-start gap-0 min-w-0'>"
+        f"{right_indent}"
+        f"<span class='text-slate-500 text-sm pt-1.5 ml-1'>{icon}</span>"
+        f"<div class='min-w-0 flex-1 ml-1'>"
+        f"{_proposed_input(node, is_root)}"
+        f"{note_html}"
+        f"</div>"
+        f"</div>"
+        f"</div>"
+    )
+
+    parts_html = [row]
+    if node["type"] == "folder":
+        for i, child in enumerate(node.get("children", [])):
+            parts_html.append(_render_tree_node(child, depth + 1, i))
+    return "".join(parts_html)
+
+
+def _count_changes(node: dict) -> tuple[int, int]:
+    """Return (total_nodes, changed_nodes) recursively."""
+    total = 0
+    changed = 0
+    is_root = node.get("is_root") is True
+    if not is_root:
+        total += 1
+        # New user-created folders always count as changes; existing ones
+        # count only when their proposed name differs from their disk name.
+        if node.get("is_new") or node["name"] != node["proposed"]:
+            changed += 1
+    for child in node.get("children") or []:
+        t, c = _count_changes(child)
+        total += t
+        changed += c
+    return total, changed
+
+
+def _render_rename(cfg: Config, banner: str = "") -> str:
+    tree = state.get_rename_tree()
+    header = ""
+    if banner:
+        header = f"<div class='mb-3 text-sm'>{banner}</div>"
+
+    if not tree:
+        total = state.all_media_count()
+        empty = (
+            "<div class='text-slate-400 text-sm'>No pending rename batch. "
+            "Click <b>Generate suggestions</b> to build the folder tree "
+            f"from the library ({total} file(s) scanned).</div>"
+            if total else
+            "<div class='text-slate-400 text-sm'>No media scanned yet. "
+            "Run <b>Scan now</b> from Setup first, then click "
+            "<b>Generate suggestions</b> here.</div>"
+        )
+        return header + empty
+
+    total, changed = _count_changes(tree)
+    header += (
+        f"<div class='text-slate-300 text-sm mb-3'>"
+        f"<b>{total}</b> node(s) in tree \u00b7 "
+        f"<b class='text-emerald-300'>{changed}</b> pending rename"
+        f"</div>"
+    )
+
+    # Drag-resizable columns: widths are stored on the container as CSS
+    # custom properties; every row (`.vhc-rename-row`) reads them. The
+    # header's two handles adjust the vars and localStorage remembers.
+    columns_header = (
+        "<div class='vhc-rename-row grid gap-3 pb-2 mb-1 border-b border-slate-600 "
+        "text-xs uppercase tracking-wider text-slate-400 items-center'>"
+        "<div></div>"
+        "<div class='relative pr-4'>Current"
+        "<div class='vhc-col-resizer' data-col='current' "
+        "title='Drag to resize'>\u205e</div>"
+        "</div>"
+        "<div class='relative pr-4'>Proposed (Title / Middle / Right)"
+        "<div class='vhc-col-resizer' data-col='proposed' "
+        "title='Drag to resize'>\u205e</div>"
+        "</div>"
+        "</div>"
+    )
+
+    style_and_script = """
+<style>
+  #vhc-rename-tree {
+    --col-conf: 24px;
+    --col-current: 360px;
+    --col-proposed: 560px;
+  }
+  #vhc-rename-tree .vhc-rename-row {
+    grid-template-columns: var(--col-conf) var(--col-current) var(--col-proposed);
+  }
+  #vhc-rename-tree .vhc-col-resizer {
+    position: absolute;
+    top: -6px; bottom: -6px; right: -10px;
+    width: 20px;
+    cursor: col-resize;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgb(148, 163, 184);
+    font-size: 16px;
+    line-height: 1;
+    background: rgba(30, 41, 59, 0.6);
+    border-left: 1px solid rgb(71, 85, 105);
+    border-right: 1px solid rgb(71, 85, 105);
+  }
+  #vhc-rename-tree .vhc-col-resizer:hover,
+  #vhc-rename-tree .vhc-col-resizer.dragging {
+    background: rgb(56, 189, 248);
+    color: white;
+    border-color: rgb(14, 165, 233);
+  }
+  #vhc-rename-tree .vhc-plus-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    margin: 0;
+    color: rgb(100, 116, 139);
+    font-weight: bold;
+    font-size: 14px;
+    line-height: 1;
+    background: transparent;
+    border: 1px dashed rgb(51, 65, 85);
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  #vhc-rename-tree .vhc-plus-btn:hover {
+    background: rgba(56, 189, 248, 0.15);
+    color: rgb(56, 189, 248);
+    border-color: rgb(56, 189, 248);
+  }
+</style>
+<script>
+(function() {
+  var tree = document.getElementById('vhc-rename-tree');
+  if (!tree) return;
+  try {
+    var saved = JSON.parse(localStorage.getItem('vhcRenameCols') || '{}');
+    if (saved.current)  tree.style.setProperty('--col-current',  saved.current);
+    if (saved.proposed) tree.style.setProperty('--col-proposed', saved.proposed);
+  } catch (e) {}
+  tree.querySelectorAll('.vhc-col-resizer').forEach(function(handle) {
+    var which = handle.dataset.col;
+    handle.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      var startX = e.clientX;
+      var startW = parseFloat(getComputedStyle(tree).getPropertyValue('--col-' + which));
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      function onMove(ev) {
+        var newW = Math.max(200, startW + (ev.clientX - startX));
+        tree.style.setProperty('--col-' + which, newW + 'px');
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        try {
+          localStorage.setItem('vhcRenameCols', JSON.stringify({
+            current:  getComputedStyle(tree).getPropertyValue('--col-current').trim(),
+            proposed: getComputedStyle(tree).getPropertyValue('--col-proposed').trim(),
+          }));
+        } catch (e) {}
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+})();
+</script>
+"""
+    # Wrap the whole tree in a horizontal-scroll container so long paths
+    # never wrap or truncate under the parent card width.
+    return (
+        header
+        + style_and_script
+        + "<div class='overflow-x-auto'>"
+        + "<div id='vhc-rename-tree' class='min-w-max'>"
+        + columns_header
+        + _render_tree_node(tree, 0)
+        + "</div>"
+        + "</div>"
+    )
 
 
 @app.post("/api/settings", response_model=None)

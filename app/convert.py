@@ -124,6 +124,64 @@ def _classify(path: Path, cfg: Config, store: Store):
     return info
 
 
+def _quick_filter(path: Path, cfg: Config) -> bool:
+    """Cheap gate that runs before ffprobe. True = worth probing."""
+    ext = path.suffix.lower()
+    if ext not in cfg.video_extensions:
+        return False
+    if ext in cfg.raw_extensions:
+        return False
+    name_lower = path.name.lower()
+    if any(m in name_lower for m in cfg.raw_filename_markers):
+        return False
+    try:
+        if path.stat().st_size < cfg.min_size_bytes:
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _probe_for_library(path: Path, cfg: Config) -> dict:
+    """Probe `path` and return a rich item dict for the all-media list.
+
+    Raises `Skip` for raw/log codecs (they don't belong in the library view
+    at all). Files that are valid media but don't need conversion (already
+    HEVC, off-spec chroma, high bit-depth) come back with
+    `needs_convert=False` and a human-readable `skip_reason`.
+    """
+    from probe import probe_video  # local import to avoid cycles
+
+    info = probe_video(path)
+    if info.codec in cfg.raw_codecs:
+        raise Skip(f"raw/log codec: {info.codec}")
+
+    reason: str | None = None
+    if info.codec in cfg.skip_codecs:
+        reason = f"already {info.codec}"
+    elif info.chroma != "420":
+        reason = f"chroma {info.chroma} \u2014 skipped to avoid downsample"
+    elif info.bit_depth > 10:
+        reason = f"{info.bit_depth}-bit source \u2014 no lossless HEVC path"
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    return {
+        "path": str(path),
+        "codec": info.codec,
+        "width": info.width,
+        "height": info.height,
+        "duration": info.duration,
+        "size": size,
+        "bit_depth": info.bit_depth,
+        "needs_convert": reason is None,
+        "skip_reason": reason,
+    }
+
+
 def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
     """Transcode → validate → atomically replace `path`. All errors captured to store."""
     log.info("PLAN  %s  codec=%s %dx%d %.1fs %d-bit",
@@ -239,15 +297,19 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
 
 
 def discover(cfg: Config, store: Store) -> int:
-    """Walk scan_paths, populate state.pending with files needing conversion.
+    """Walk scan_paths; populate state.pending and state.all_media.
 
     Two-pass so the UI can render a real progress bar: enumerate all
     candidates fast, then probe them one by one (the expensive step).
-    Returns the number of files examined (not the pending count).
+    Populates two lists: `all_media` (every valid video the walker saw,
+    including already-HEVC ones — used by Rename tab) and `pending`
+    (the subset that still needs conversion). Returns the number of files
+    examined (not the pending count).
     """
     log.info("discover starting — paths: %s", cfg.scan_paths)
     state.scan_started()
     state.set_current(stage="scanning")
+    all_media: list[dict] = []
     pending: list[dict] = []
     n = 0
     try:
@@ -264,27 +326,42 @@ def discover(cfg: Config, store: Store) -> int:
                 break
             state.scan_probe_tick()
             n += 1
-            info = _classify(path, cfg, store)
-            if info is None:
+            if not _quick_filter(path, cfg):
                 continue
             try:
-                size = path.stat().st_size
-            except OSError:
+                item = _probe_for_library(path, cfg)
+            except Skip as s:
+                # raw/log codec — record so we don't re-probe next scan.
+                store.record(path, "skipped", reason=str(s))
                 continue
-            pending.append({
-                "path": str(path),
-                "codec": info.codec,
-                "width": info.width,
-                "height": info.height,
-                "duration": info.duration,
-                "size": size,
-                "bit_depth": info.bit_depth,
-            })
+            except Exception as e:  # noqa: BLE001
+                log.error("PROBE-FAIL %s  (%s)", path, e)
+                store.record(path, "failed", reason=f"probe: {e}")
+                continue
+
+            all_media.append(item)
+
+            if item["needs_convert"]:
+                # Cached OK/skip from a prior successful pass — don't re-queue.
+                if store.already_done(path):
+                    continue
+                pending.append({
+                    k: item[k] for k in
+                    ("path", "codec", "width", "height",
+                     "duration", "size", "bit_depth")
+                })
+            elif item["skip_reason"]:
+                # Off-spec but valid media — memoise so future scans skip fast.
+                store.record(path, "skipped", reason=item["skip_reason"])
     finally:
         state.set_pending(pending)
+        state.set_all_media(all_media)
         state.scan_ended(n)
         state.clear_current()
-    log.info("discover complete — %d file(s) examined, %d pending", n, len(pending))
+    log.info(
+        "discover complete — %d file(s) examined, %d in library, %d pending",
+        n, len(all_media), len(pending),
+    )
     return n
 
 

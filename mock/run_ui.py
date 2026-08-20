@@ -208,7 +208,32 @@ def _sample_pending() -> list[dict]:
         {"path": "/media/Movies/Wicked (2024).mkv",        "codec": "h264",  "width": 3840, "height": 2160, "duration": 9560,  "size": 23_400_000_000, "bit_depth": 10},
     ]
 
+
+# Seed all-media list: pending items (marked needs_convert) plus a bunch of
+# already-HEVC files so the "X of Y in library" indicator has real numbers.
+def _sample_all_media() -> list[dict]:
+    # Include a few deliberately messy filenames so the Rename tab has
+    # non-trivial suggestions to show.
+    already_hevc = [
+        {"path": "/media/Movies/Dune Part Two (2024).mkv",  "codec": "hevc", "width": 3840, "height": 2160, "duration": 9840,  "size": 14_200_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/Oppenheimer (2023).mkv",    "codec": "hevc", "width": 3840, "height": 2160, "duration": 10800, "size": 15_600_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/Inside Out 2 (2024).mkv",   "codec": "hevc", "width": 1920, "height": 1080, "duration": 5760,  "size": 4_100_000_000,  "bit_depth": 8},
+        {"path": "/media/Movies/The.Dark.Knight.2008.EXTENDED.2160p.UHD.BluRay.x265.10bit.HDR.mkv", "codec": "hevc", "width": 3840, "height": 2160, "duration": 10380, "size": 14_800_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/messy_filename_no_year.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 5400, "size": 3_800_000_000, "bit_depth": 8},
+        {"path": "/media/TVShows/Series-A/Show.Name.S01E01.Pilot.1080p.WEB-DL.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2650,  "size": 1_400_000_000,  "bit_depth": 8},
+        {"path": "/media/TVShows/Series-A/Show.Name.S01E02.The.Second.One.1080p.WEB-DL.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2670,  "size": 1_420_000_000,  "bit_depth": 8},
+        {"path": "/media/TVShows/Series-A/Show.Name.S01E03.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2680,  "size": 1_450_000_000,  "bit_depth": 8},
+    ]
+    items = []
+    for it in _sample_pending():
+        items.append({**it, "needs_convert": True, "skip_reason": None})
+    for it in already_hevc:
+        items.append({**it, "needs_convert": False, "skip_reason": "already hevc"})
+    return items
+
+
 state.set_pending(_sample_pending())
+state.set_all_media(_sample_all_media())
 
 
 def _fake_encoder() -> None:
@@ -232,6 +257,7 @@ def _fake_encoder() -> None:
                     time.sleep(0.05)  # ~50 ms per "probe" so the bar visibly fills
                     state.scan_probe_tick()
                 state.set_pending(_sample_pending())
+                state.set_all_media(_sample_all_media())
                 state.scan_ended(total)
 
         items = state.get_pending()
