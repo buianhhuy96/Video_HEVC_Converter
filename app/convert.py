@@ -16,7 +16,7 @@ from config import Config, load_config
 from probe import Skip, classify, has_qsv_device
 from store import Store
 from transcoder import NotSupported, atomic_replace, transcode
-from validator import ValidationError, validate
+from validator import ValidationError, precheck_source, validate
 
 log = logging.getLogger("converter")
 
@@ -145,10 +145,23 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
     orig_size = orig_stat.st_size
     orig_mtime = orig_stat.st_mtime
     tmp_out: Path | None = None
+    t_start = time.time()
     state.set_current(path=str(path), stage="encoding",
-                      started_at=time.time(), progress={},
+                      started_at=t_start, progress={},
                       duration=info.duration)
     try:
+        # Pre-flight: if the source is already damaged (bad PTS, corrupt
+        # frames, unreadable middle), skip it. Encoding a broken source
+        # produces a broken output AND destroys the original.
+        try:
+            precheck_source(path, info)
+        except ValidationError as e:
+            log.warning("PRECHECK-FAIL %s  (%s)", path, e)
+            store.record(path, "failed", reason=f"source damaged: {e}",
+                         orig_codec=info.codec,
+                         duration_seconds=time.time() - t_start)
+            return
+
         tmp_out = transcode(info, cfg)
         state.set_current(stage="validating", progress={})
         validate(info, tmp_out, cfg.validation,
@@ -165,14 +178,16 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             log.error("REPLACE-FAIL %s  (source vanished during encode: %s)", path, e)
             tmp_out.unlink(missing_ok=True)
             store.record(path, "failed", reason=f"source vanished: {e}",
-                         orig_codec=info.codec)
+                         orig_codec=info.codec,
+                         duration_seconds=time.time() - t_start)
             return
         if (current_stat.st_size != orig_size
                 or abs(current_stat.st_mtime - orig_mtime) > 1.0):
             log.warning("REPLACE-FAIL %s  (source modified during encode)", path)
             tmp_out.unlink(missing_ok=True)
             store.record(path, "failed", reason="source modified during encode",
-                         orig_codec=info.codec)
+                         orig_codec=info.codec,
+                         duration_seconds=time.time() - t_start)
             return
 
         state.set_current(stage="replacing")
@@ -187,6 +202,7 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             final, "ok",
             orig_codec=info.codec, new_codec="hevc",
             orig_size=orig_size, new_size=new_size,
+            duration_seconds=time.time() - t_start,
         )
     except ValidationError as e:
         log.error("VALIDATION-FAIL %s  (%s)", path, e)
@@ -196,12 +212,16 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             # Validation was interrupted by user stop; keep for retry.
             log.info("VALIDATE-CANCELLED %s", path)
         else:
-            store.record(path, "failed", reason=f"validate: {e}", orig_codec=info.codec)
+            store.record(path, "failed", reason=f"validate: {e}",
+                         orig_codec=info.codec,
+                         duration_seconds=time.time() - t_start)
     except NotSupported as e:
         log.info("SKIP  %s  (%s)", path, e)
         if tmp_out and tmp_out.exists():
             tmp_out.unlink(missing_ok=True)
-        store.record(path, "skipped", reason=f"encoder: {e}", orig_codec=info.codec)
+        store.record(path, "skipped", reason=f"encoder: {e}",
+                     orig_codec=info.codec,
+                     duration_seconds=time.time() - t_start)
     except Exception as e:  # noqa: BLE001
         if tmp_out and tmp_out.exists():
             tmp_out.unlink(missing_ok=True)
@@ -211,7 +231,9 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             log.info("ENCODE-CANCELLED %s", path)
         else:
             log.error("ENCODE-FAIL %s  (%s)", path, e)
-            store.record(path, "failed", reason=f"encode: {e}", orig_codec=info.codec)
+            store.record(path, "failed", reason=f"encode: {e}",
+                         orig_codec=info.codec,
+                         duration_seconds=time.time() - t_start)
     finally:
         state.clear_current()
 

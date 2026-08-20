@@ -9,16 +9,17 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed (
-    path        TEXT PRIMARY KEY,
-    size        INTEGER NOT NULL,
-    mtime       REAL    NOT NULL,
-    status      TEXT    NOT NULL,   -- 'ok' | 'skipped' | 'failed'
-    reason      TEXT,
-    orig_codec  TEXT,
-    new_codec   TEXT,
-    orig_size   INTEGER,
-    new_size    INTEGER,
-    ts          REAL    NOT NULL
+    path             TEXT PRIMARY KEY,
+    size             INTEGER NOT NULL,
+    mtime            REAL    NOT NULL,
+    status           TEXT    NOT NULL,   -- 'ok' | 'skipped' | 'failed'
+    reason           TEXT,
+    orig_codec       TEXT,
+    new_codec        TEXT,
+    orig_size        INTEGER,
+    new_size         INTEGER,
+    duration_seconds REAL,               -- wall-clock time spent on this file
+    ts               REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_status ON processed(status);
 """
@@ -30,6 +31,12 @@ class Store:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    def _migrate(self, con: sqlite3.Connection) -> None:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(processed)").fetchall()}
+        if "duration_seconds" not in cols:
+            con.execute("ALTER TABLE processed ADD COLUMN duration_seconds REAL")
 
     @contextmanager
     def _conn(self):
@@ -70,13 +77,14 @@ class Store:
             c.execute(
                 """INSERT INTO processed
                    (path, size, mtime, status, reason, orig_codec, new_codec,
-                    orig_size, new_size, ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                    orig_size, new_size, duration_seconds, ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(path) DO UPDATE SET
                      size=excluded.size, mtime=excluded.mtime,
                      status=excluded.status, reason=excluded.reason,
                      orig_codec=excluded.orig_codec, new_codec=excluded.new_codec,
                      orig_size=excluded.orig_size, new_size=excluded.new_size,
+                     duration_seconds=excluded.duration_seconds,
                      ts=excluded.ts""",
                 (
                     str(path), size, mtime, status,
@@ -85,6 +93,7 @@ class Store:
                     fields.get("new_codec"),
                     fields.get("orig_size"),
                     fields.get("new_size"),
+                    fields.get("duration_seconds"),
                     time.time(),
                 ),
             )

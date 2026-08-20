@@ -173,6 +173,13 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
                             "matrix_coefficients=1:"
                             "video_full_range_flag=0"]
     args += ["-map_metadata", "0", "-map_chapters", "0"]
+    # Prevent silent packet drops when the HW pipeline pushes bursts faster
+    # than the muxer normally accepts; and keep container timestamps
+    # monotonic even if the source has negative or reordered PTS.
+    args += [
+        "-max_muxing_queue_size", "9999",
+        "-avoid_negative_ts", "make_zero",
+    ]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
     return args

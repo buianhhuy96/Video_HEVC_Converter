@@ -143,7 +143,8 @@ def _recent(db_path: str, limit: int = 15) -> list[dict]:
     try:
         with sqlite3.connect(db_path) as c:
             rows = c.execute(
-                "SELECT path, status, reason, orig_codec, orig_size, new_size, ts "
+                "SELECT path, status, reason, orig_codec, orig_size, new_size, "
+                "duration_seconds, ts "
                 "FROM processed ORDER BY ts DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -153,7 +154,9 @@ def _recent(db_path: str, limit: int = 15) -> list[dict]:
         {
             "path": r[0], "status": r[1], "reason": r[2] or "",
             "orig_codec": r[3] or "", "orig_size": r[4] or 0,
-            "new_size": r[5] or 0, "ts": r[6],
+            "new_size": r[5] or 0,
+            "duration_seconds": r[6],
+            "ts": r[7],
         }
         for r in rows
     ]
@@ -1104,12 +1107,15 @@ def _render_recent(cfg: Config) -> str:
         if r["status"] == "ok" and r["orig_size"] and r["new_size"]:
             pct = (1 - r["new_size"] / r["orig_size"]) * 100
             savings = f"− {pct:.0f}% ({_fmt_bytes(r['orig_size'])} → {_fmt_bytes(r['new_size'])})"
+        dur = r.get("duration_seconds")
+        took = _fmt_elapsed(dur) if dur and dur > 0 else ""
         body.append(
             f"<tr class='border-b border-slate-700'>"
             f"<td class='py-1 pr-3'><span class='badge {badge}'>{_esc(r['status'])}</span></td>"
             f"<td class='py-1 pr-3 font-mono text-xs text-cyan-300 truncate max-w-md'>{_esc(r['path'])}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-400'>{_esc(r['orig_codec'])}</td>"
             f"<td class='py-1 pr-3 text-xs'>{_esc(savings or r['reason'])}</td>"
+            f"<td class='py-1 pr-3 text-xs text-slate-500' title='Time spent on this file'>{_esc(took)}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-400'>{_fmt_age(r['ts'])}</td>"
             f"</tr>"
         )

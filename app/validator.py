@@ -85,15 +85,16 @@ def validate(
         # (uses the iGPU's fixed-function decoder — an order of magnitude
         # faster than software), then fall back to software if QSV isn't
         # usable for this file.
-        # rc alone is trusted; ffmpeg was invoked with `-xerror` so any real
-        # decode error makes it exit non-zero. Stderr may still contain
-        # benign chatter (libva init, VA-API driver info) that must not be
-        # treated as failure.
+        # rc alone is not enough: ffmpeg's stream demuxer will happily hit
+        # EOF on a truncated file with rc=0 even if only 3 minutes of a
+        # 2-hour source made it into the container. So we also demand the
+        # decoded out_time reach at least (source duration - tolerance).
         base = ["ffmpeg", "-nostdin", "-v", "error", "-xerror"]
         tail = ["-i", str(new_path), "-progress", "pipe:1", "-f", "null", "-"]
+        last_progress: dict[str, str] = {}
         for accel in (["-hwaccel", "qsv"], []):
             cmd = base + accel + tail
-            rc, stderr = _run_full_decode(cmd, progress_cb)
+            rc, stderr, last_progress = _run_full_decode(cmd, progress_cb)
             if rc == 0:
                 break
             if accel:
@@ -102,13 +103,39 @@ def validate(
             raise ValidationError(
                 f"full-decode failed: rc={rc} stderr={stderr.strip()[:400]}"
             )
+        # Truncation check: how much of the file actually decoded?
+        decoded_s = _parse_out_time(last_progress.get("out_time"))
+        if decoded_s is not None and original.duration > 0:
+            gap = original.duration - decoded_s
+            if gap > cfg.duration_tolerance_seconds:
+                raise ValidationError(
+                    f"decoded output is truncated: source={original.duration:.1f}s "
+                    f"but decoded only {decoded_s:.1f}s "
+                    f"(missing {gap:.1f}s of content)"
+                )
+
+
+def _parse_out_time(s: str | None) -> float | None:
+    """Parse ffmpeg's HH:MM:SS.uuuuuu progress timestamp into seconds."""
+    if not s:
+        return None
+    try:
+        parts = s.split(":")
+        if len(parts) != 3:
+            return None
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except (ValueError, IndexError):
+        return None
 
 
 def _run_full_decode(
     cmd: list[str],
     progress_cb: Callable[[dict[str, str]], None] | None,
-) -> tuple[int, str]:
-    """Run ffmpeg with -progress pipe:1 and push each sample to progress_cb."""
+) -> tuple[int, str, dict[str, str]]:
+    """Run ffmpeg with -progress pipe:1 and push each sample to progress_cb.
+
+    Returns (returncode, stderr_text, final_progress_dict).
+    """
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
@@ -137,4 +164,45 @@ def _run_full_decode(
                 log.exception("validation progress_cb raised")
     proc.wait()
     t.join(timeout=1)
-    return proc.returncode, "".join(stderr_lines)
+    return proc.returncode, "".join(stderr_lines), progress
+
+
+def precheck_source(src: Path, info: VideoInfo, sample_seconds: int = 30) -> None:
+    """Sample-decode the source to catch damage before we start encoding.
+
+    Encoding a source with broken PTS or corrupted packets produces an
+    unplayable output that also destroys the original. We do a fast software
+    decode of a window near the middle of the file (where corruption is
+    typically most visible) and fail loudly if ffmpeg reports any error.
+
+    Raises ValidationError if the source is not safely encodable.
+    """
+    if info.duration <= 0:
+        # No duration to seek into; probe already worked, so trust it.
+        return
+
+    # Middle of file — start/end are usually intact even in damaged rips.
+    start = max(0.0, info.duration / 2 - sample_seconds / 2)
+    cmd = [
+        "ffmpeg", "-nostdin", "-v", "error", "-xerror",
+        "-ss", f"{start:.2f}",
+        "-i", str(src),
+        "-t", str(sample_seconds),
+        "-map", "0:v:0",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=max(60, sample_seconds * 4),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ValidationError(
+            f"source precheck timed out (ffmpeg hung reading {src.name})"
+        ) from e
+
+    if proc.returncode != 0 or proc.stderr.strip():
+        msg = proc.stderr.strip().splitlines()
+        first_error = msg[0] if msg else f"rc={proc.returncode}"
+        raise ValidationError(f"source appears damaged: {first_error[:300]}")
+
