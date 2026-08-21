@@ -159,11 +159,14 @@ class RenameMetadataTests(unittest.TestCase):
         self.assertEqual(metadata_search_context(node), ("tv", None))
         apply_metadata_match(node, "tmdb", "2316", "tv", "The Office", 2005)
 
+        # Jellyfin convention: year lives on the series folder, NOT in the
+        # episode filename — so title stays year-free even though TMDB
+        # returned one.
         self.assertEqual(
             node["parts"],
-            {"title": "The Office (2005)", "middle": "S01E05", "right": "Pilot"},
+            {"title": "The Office", "middle": "S01E05", "right": "Pilot"},
         )
-        self.assertEqual(node["proposed"], "The Office (2005) - S01E05 - Pilot.mkv")
+        self.assertEqual(node["proposed"], "The Office - S01E05 - Pilot.mkv")
 
     def test_bare_tv_episode_selection_emits_episode_destination_filename(self) -> None:
         node = _new_file_node(Path("/media/TVShows/Series-A/S01E05.mkv"))
@@ -174,9 +177,10 @@ class RenameMetadataTests(unittest.TestCase):
         )
         apply_metadata_match(node, "tmdb", "2316", "tv", "The Office", 2005)
 
+        # Same rule: no year in the emitted episode filename.
         self.assertEqual(
             self._destination_name(node),
-            "The Office (2005) - S01E05.mkv",
+            "The Office - S01E05.mkv",
         )
 
     def test_episode_title_drops_dangling_open_paren_before_release_tag(self) -> None:
@@ -418,6 +422,32 @@ class FolderNameCleaningTests(unittest.TestCase):
         node = _new_file_node(Path("/media/TVShows/Better Call Saul/SS1/S01E05.mkv"))
         self.assertEqual(node["parts"]["title"], "Better Call Saul")
         self.assertEqual(node["parts"]["middle"], "S01E05")
+
+    def test_bare_episode_number_under_season_folder_infers_SxxExx(self) -> None:
+        """Files whose only episode marker is a bare number (Tập 1,
+        Episode 5, E07, or a trailing '05') should still be recognised
+        as TV episodes when the parent folder tells us the season."""
+        cases = {
+            "Tập 1.mkv": "S01E01",
+            "Tập 10.mkv": "S01E10",
+            "Tap 3.mkv": "S01E03",  # ASCII fallback for user typos
+            "Episode 5.mkv": "S01E05",
+            "Ep.7.mkv": "S01E07",
+            "E08.mkv": "S01E08",
+            "Money Heist - 12.mkv": "S01E12",
+        }
+        for filename, expected_middle in cases.items():
+            with self.subTest(filename=filename):
+                node = _new_file_node(Path(f"/media/TVShows/Money.Heist/ss1/{filename}"))
+                self.assertEqual(node["parts"]["middle"], expected_middle)
+                self.assertEqual(node["parts"]["title"], "Money Heist")
+
+    def test_bare_episode_number_not_inferred_without_season_folder(self) -> None:
+        """When the parent folder isn't recognisable as a season, we
+        must NOT guess an episode number from ambiguous filenames — the
+        file should fall back to the movie/unknown path."""
+        node = _new_file_node(Path("/media/Movies/Tập 1.mkv"))
+        self.assertNotEqual(node["parts"]["middle"], "S01E01")
 
 
 class ApplyIsIdempotentTests(unittest.TestCase):

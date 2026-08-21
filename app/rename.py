@@ -134,6 +134,35 @@ def parse_filename(path: Path) -> ParsedMedia:
             confidence="high" if title else "low",
         )
 
+    # Bare-episode inference: filename has no SxxExx, but the parent
+    # folder is a season/specials folder. Derive the season from the
+    # parent and the episode number from a tolerant filename pattern.
+    parent_name = path.parent.name
+    parent_season = _season_number(parent_name)
+    if parent_season is not None or _SPECIALS_FOLDER.match(parent_name):
+        season = parent_season if parent_season is not None else 0
+        hit = _extract_episode_number(name)
+        if hit is not None:
+            episode_num, (start, end) = hit
+            before = name[:start].rstrip(" .-_")
+            after = name[end:].strip(" .-_")
+            leftover = " ".join(chunk for chunk in (before, after) if chunk)
+            ep_title = _clean_title(leftover) or None
+            if ep_title:
+                stop = _RELEASE_STOP.search(ep_title)
+                if stop:
+                    ep_title = _clean_title(ep_title[:stop.start()]) or None
+            grandparent_name = path.parent.parent.name
+            show_title = _clean_title(grandparent_name) or None if grandparent_name else None
+            return ParsedMedia(
+                kind="tv",
+                title=show_title,
+                season=season,
+                episode=episode_num,
+                episode_title=ep_title,
+                confidence="medium",
+            )
+
     title, year = _split_at_year(name)
     if not title:
         return ParsedMedia(kind="unknown", confidence="low")
@@ -250,6 +279,27 @@ def _canonical_season(name: str) -> str | None:
 
 def _is_season_or_specials(name: str) -> bool:
     return _season_number(name) is not None or bool(_SPECIALS_FOLDER.match(name.strip()))
+
+
+# Tolerant patterns for extracting a bare episode number from a filename
+# when the parent folder already tells us the season (e.g. `Tập 1.mkv`
+# under `ss1/`). Order matters: word-anchored markers before bare digits.
+_EPISODE_HINTS: list[re.Pattern[str]] = [
+    re.compile(r"T[ậa]p[\s._\-]*0*(\d{1,3})", re.IGNORECASE),
+    re.compile(r"\b(?:Episode|Ep|Chapter|Ch)\.?[\s._\-]*0*(\d{1,3})\b", re.IGNORECASE),
+    re.compile(r"(?:^|[\s._\-])E0*(\d{1,3})(?=$|[\s._\-])", re.IGNORECASE),
+    re.compile(r"(?:^|[\s._\-])0*(\d{1,3})\s*$"),
+]
+
+
+def _extract_episode_number(stem: str) -> tuple[int, tuple[int, int]] | None:
+    """Return (episode_number, matched_span) for a stem like 'Tập 1' or
+    'Episode 5', otherwise None."""
+    for pattern in _EPISODE_HINTS:
+        m = pattern.search(stem)
+        if m:
+            return int(m.group(1)), m.span()
+    return None
 
 # Tolerant patterns for user-typed episode markers. Accept extra S's,
 # alternative separators, and the NxNN shorthand.
@@ -412,7 +462,12 @@ def apply_metadata_match(node: dict, provider: str, provider_id: str,
         parts["title"] = title
         parts["middle"] = str(year) if year else ""
     else:
-        parts["title"] = f"{title} ({year})" if year else title
+        # Jellyfin best practice: episode filenames omit the year — it
+        # lives on the parent series folder (Breaking Bad (2008)/Season 02/
+        # Breaking Bad - S02E01 - Seven Thirty-Seven.mkv). Users can apply
+        # the TMDB match to the show folder separately to get the year
+        # there.
+        parts["title"] = title
         if _YEAR_STRICT.match(middle):
             parts["middle"] = ""
 
