@@ -98,11 +98,13 @@ encoder:
   look_ahead: true
   look_ahead_depth: 60
 
-  # HW post-processing filters on the QSV path. 0 = off, 1..5 = intensity.
-  # Sharpen restores micro-contrast lost to encoder smoothing; denoise
-  # cleans noisy sources at the cost of erasing film grain.
+  # HW post-processing filters on the QSV path.
+  # sharpen: 0 = off, 1..5 = intensity (restores micro-contrast).
+  # denoise: raw vpp_qsv=denoise strength (0..100, 0 = off). Cleans noisy
+  # sources at the cost of erasing film grain — set the slider low or 0
+  # on cherished grainy films.
   sharpen: 2
-  denoise: 1
+  denoise: 0
 
   # Regenerate output timestamps at a constant frame rate. Workaround for
   # QSV pipeline bugs where a long source produces a container whose header

@@ -66,21 +66,26 @@ def _choose_container(src: Path, cfg: Config) -> str:
 
 # Level → vpp_qsv `detail` (HW detail enhancer, 0..100).
 _VPP_DETAIL_STRENGTHS = {1: 20, 2: 40, 3: 60, 4: 80, 5: 100}
-# Level → vpp_qsv `denoise` (HW noise reducer, 0..100). Aggressive values
-# also erase film grain, so keep the curve gentler than detail.
-_VPP_DENOISE_STRENGTHS = {1: 5, 2: 15, 3: 30, 4: 50, 5: 80}
 
 # Level → software `unsharp` luma_amount for the NVENC path.
 _SW_SHARPEN_STRENGTHS = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6}
-# Level → software `hqdn3d` params (luma_spatial, chroma_spatial, luma_temp,
-# chroma_temp). Curve mirrors vpp_qsv=denoise for consistent slider feel.
-_SW_DENOISE_PARAMS = {
-    1: "1:0.5:3:3",
-    2: "2:1:4:4",
-    3: "3:1.5:6:6",
-    4: "4:2:8:8",
-    5: "6:3:9:9",
-}
+
+
+def _sw_hqdn3d_params(strength: int) -> str | None:
+    """Bucket the QSV-scale (0..100) denoise value into hqdn3d params for
+    the NVENC/software path. hqdn3d isn't linear in the same way; keep
+    each bucket well-separated so the slider still feels responsive."""
+    if strength <= 0:
+        return None
+    if strength <= 15:
+        return "0.5:0.25:1.5:1.5"
+    if strength <= 30:
+        return "2:1:4:4"
+    if strength <= 50:
+        return "3:1.5:6:6"
+    if strength <= 70:
+        return "4:2:8:8"
+    return "6:3:9:9"
 
 
 def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
@@ -93,8 +98,8 @@ def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:
     detail = _VPP_DETAIL_STRENGTHS.get(int(cfg.encoder.sharpen or 0))
     if detail is not None:
         parts.append(f"detail={detail}")
-    denoise = _VPP_DENOISE_STRENGTHS.get(int(cfg.encoder.denoise or 0))
-    if denoise is not None:
+    denoise = int(cfg.encoder.denoise or 0)
+    if denoise > 0:
         parts.append(f"denoise={denoise}")
     if out_fmt:
         parts.append(f"format={out_fmt}")
@@ -108,7 +113,7 @@ def _sw_filter_chain(cfg: Config, out_fmt: str) -> str:
     parts: list[str] = []
     if cfg.encoder.deband:
         parts.append("gradfun=1.5:8")
-    denoise = _SW_DENOISE_PARAMS.get(int(cfg.encoder.denoise or 0))
+    denoise = _sw_hqdn3d_params(int(cfg.encoder.denoise or 0))
     if denoise is not None:
         parts.append(f"hqdn3d={denoise}")
     sharpen = _SW_SHARPEN_STRENGTHS.get(int(cfg.encoder.sharpen or 0))

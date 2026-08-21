@@ -38,7 +38,6 @@ _config_path: str = "/config/config.yaml"
 
 PRESETS = ["veryfast", "fast", "medium", "slow", "slower", "veryslow"]
 SHARPEN_NAMES = ["Off", "Very light", "Light", "Moderate", "Strong", "Very strong"]
-DENOISE_NAMES = ["Off", "Very light", "Light", "Moderate", "Strong", "Very strong"]
 # Look-ahead depth positions on the slider (0 = disabled, higher = deeper).
 LOOKAHEAD_STEPS = [0, 20, 40, 60, 80, 100]
 
@@ -473,20 +472,20 @@ def _render_page(cfg: Config) -> str:
             <div>
               <div class='flex items-baseline justify-between mb-1'>
                 <label class='text-sm'>Denoise</label>
-                <span id='vhc-denoise-val' class='font-mono text-slate-100 text-sm'>{DENOISE_NAMES[e.denoise]}</span>
+                <span id='vhc-denoise-val' class='font-mono text-slate-100 text-sm'>{'Off' if e.denoise == 0 else e.denoise}</span>
               </div>
               <p class='text-[11px] text-slate-500 mb-2'>
                 <code>vpp_qsv=denoise</code> on the iGPU. Cleans noise on
                 low-quality sources and helps compression. Trade-off: erases
-                film grain \u2014 keep Off / Very light on cherished grainy films.
+                film grain \u2014 keep the slider low on cherished grainy films.
               </p>
-              <input type='range' min='0' max='{len(DENOISE_NAMES) - 1}' step='1'
+              <input type='range' min='0' max='100' step='2'
                      value='{e.denoise}' class='vhc-slider'
                      oninput='vhcDenoiseUpdate(this)'>
               <input type='hidden' name='denoise' id='vhc-denoise-hidden' value='{e.denoise}'>
               <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
-                <span>{DENOISE_NAMES[0]}</span>
-                <span>{DENOISE_NAMES[-1]}</span>
+                <span>0 (off)</span>
+                <span>100</span>
               </div>
             </div>
             <div>
@@ -513,7 +512,6 @@ def _render_page(cfg: Config) -> str:
               (function() {{
                 const PRESET_NAMES = {PRESETS!r};
                 const SHARPEN_NAMES = {SHARPEN_NAMES!r};
-                const DENOISE_NAMES = {DENOISE_NAMES!r};
                 const LOOKAHEAD_STEPS = {LOOKAHEAD_STEPS!r};
                 window.vhcPresetUpdate = function(el) {{
                   const name = PRESET_NAMES[parseInt(el.value)];
@@ -532,9 +530,9 @@ def _render_page(cfg: Config) -> str:
                   document.getElementById('vhc-sharpen-hidden').value = idx;
                 }};
                 window.vhcDenoiseUpdate = function(el) {{
-                  const idx = parseInt(el.value);
-                  document.getElementById('vhc-denoise-val').textContent = DENOISE_NAMES[idx];
-                  document.getElementById('vhc-denoise-hidden').value = idx;
+                  const val = parseInt(el.value);
+                  document.getElementById('vhc-denoise-val').textContent = val === 0 ? 'Off' : String(val);
+                  document.getElementById('vhc-denoise-hidden').value = val;
                 }};
                 window.vhcLookaheadUpdate = function(el) {{
                   const depth = LOOKAHEAD_STEPS[parseInt(el.value)];
@@ -2487,8 +2485,8 @@ def api_settings(
         raise HTTPException(400, f"preset must be one of {PRESETS}")
     if not 0 <= sharpen < len(SHARPEN_NAMES):
         raise HTTPException(400, f"sharpen must be 0..{len(SHARPEN_NAMES) - 1}")
-    if not 0 <= denoise < len(DENOISE_NAMES):
-        raise HTTPException(400, f"denoise must be 0..{len(DENOISE_NAMES) - 1}")
+    if not 0 <= denoise <= 100:
+        raise HTTPException(400, "denoise must be 0-100")
     if not 0 <= look_ahead_depth <= 100:
         raise HTTPException(400, "look_ahead_depth must be 0-100")
     sweep_at_time = sweep_at_time.strip()
