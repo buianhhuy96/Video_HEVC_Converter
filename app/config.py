@@ -27,7 +27,7 @@ class EncoderCfg:
     preserve_color_metadata: bool = True
     # 0 = off; 1..5 map to vpp_qsv=detail=N on the QSV path.
     sharpen: int = 2
-    # Raw vpp_qsv=denoise strength (0..100, 0 = off). NVENC path buckets
+    # Raw vpp_qsv=denoise strength (0..20, 0 = off). NVENC path buckets
     # the same value into hqdn3d params.
     denoise: int = 0
     # Software deband (`gradfun`) before the encoder. QSV path rejects this

@@ -72,20 +72,18 @@ _SW_SHARPEN_STRENGTHS = {1: 0.3, 2: 0.5, 3: 0.8, 4: 1.2, 5: 1.6}
 
 
 def _sw_hqdn3d_params(strength: int) -> str | None:
-    """Bucket the QSV-scale (0..100) denoise value into hqdn3d params for
+    """Bucket the QSV-scale (0..20) denoise value into hqdn3d params for
     the NVENC/software path. hqdn3d isn't linear in the same way; keep
     each bucket well-separated so the slider still feels responsive."""
     if strength <= 0:
         return None
-    if strength <= 15:
+    if strength <= 5:
         return "0.5:0.25:1.5:1.5"
-    if strength <= 30:
+    if strength <= 10:
+        return "1:0.5:2.5:2.5"
+    if strength <= 15:
         return "2:1:4:4"
-    if strength <= 50:
-        return "3:1.5:6:6"
-    if strength <= 70:
-        return "4:2:8:8"
-    return "6:3:9:9"
+    return "3:1.5:6:6"
 
 
 def _vpp_qsv_filter(cfg: Config, out_fmt: str | None) -> str:

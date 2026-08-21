@@ -479,13 +479,13 @@ def _render_page(cfg: Config) -> str:
                 low-quality sources and helps compression. Trade-off: erases
                 film grain \u2014 keep the slider low on cherished grainy films.
               </p>
-              <input type='range' min='0' max='100' step='2'
+              <input type='range' min='0' max='20' step='2'
                      value='{e.denoise}' class='vhc-slider'
                      oninput='vhcDenoiseUpdate(this)'>
               <input type='hidden' name='denoise' id='vhc-denoise-hidden' value='{e.denoise}'>
               <div class='flex justify-between text-[10px] text-slate-500 mt-1'>
                 <span>0 (off)</span>
-                <span>100</span>
+                <span>20</span>
               </div>
             </div>
             <div>
@@ -2485,8 +2485,8 @@ def api_settings(
         raise HTTPException(400, f"preset must be one of {PRESETS}")
     if not 0 <= sharpen < len(SHARPEN_NAMES):
         raise HTTPException(400, f"sharpen must be 0..{len(SHARPEN_NAMES) - 1}")
-    if not 0 <= denoise <= 100:
-        raise HTTPException(400, "denoise must be 0-100")
+    if not 0 <= denoise <= 20:
+        raise HTTPException(400, "denoise must be 0-20")
     if not 0 <= look_ahead_depth <= 100:
         raise HTTPException(400, "look_ahead_depth must be 0-100")
     sweep_at_time = sweep_at_time.strip()
