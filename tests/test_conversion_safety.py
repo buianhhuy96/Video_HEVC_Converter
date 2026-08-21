@@ -46,23 +46,32 @@ class ProgressRenderingTests(unittest.TestCase):
         state.clear_current()
         state.set_pending([])
 
-    def test_validation_progress_accepts_na_output_size(self) -> None:
+    def test_validation_progress_shows_reliable_metrics_only(self) -> None:
+        """Bitrate/total_size are unreliable under -max_interleave_delta 0;
+        the progress card must show reliable metrics (frame count, source
+        size) instead, and _fmt_bytes must survive N/A input safely."""
         state.set_current(
             path="episode.mkv",
             stage="validating",
             started_at=time.time(),
             duration=1938.7,
+            size=1234567890,
             progress={
                 "out_time": "00:10:00.000000",
                 "total_size": "N/A",
                 "speed": "40x",
                 "bitrate": "N/A",
+                "frame": "17280",
             },
         )
 
         markup = webui._render_progress()
 
-        self.assertIn("Output size so far", markup)
+        self.assertIn("Frames encoded", markup)
+        self.assertIn("17280", markup)
+        self.assertIn("Source size", markup)
+        self.assertNotIn("Bitrate", markup)
+        self.assertNotIn("Output size so far", markup)
         self.assertEqual(webui._fmt_bytes("N/A"), "\u2014")
         self.assertEqual(webui._fmt_bytes("1024"), "1.0 KiB")
 

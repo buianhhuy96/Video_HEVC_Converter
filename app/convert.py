@@ -206,7 +206,7 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
     t_start = time.time()
     state.set_current(path=str(path), stage="encoding",
                       started_at=t_start, progress={},
-                      duration=info.duration)
+                      duration=info.duration, size=orig_size)
     try:
         # Pre-flight: if the source is already damaged (bad PTS, corrupt
         # frames, unreadable middle), skip it. Encoding a broken source

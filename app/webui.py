@@ -1085,15 +1085,15 @@ def _render_progress() -> str:
               </div>
             </div>
             <div class='bg-slate-900 rounded p-3'>
-              <div class='text-xs text-slate-400'>Bitrate</div>
+              <div class='text-xs text-slate-400'>Frames encoded</div>
               <div class='text-lg font-semibold text-slate-100'>
-                {_esc(p.get("bitrate", "—"))}
+                {_esc(p.get("frame", "—"))}
               </div>
             </div>
             <div class='bg-slate-900 rounded p-3'>
-              <div class='text-xs text-slate-400'>Output size so far</div>
+              <div class='text-xs text-slate-400'>Source size</div>
               <div class='text-lg font-semibold text-slate-100'>
-                {_fmt_bytes(p.get("total_size"))}
+                {_fmt_bytes(cur.get("size"))}
               </div>
             </div>
           </div>
