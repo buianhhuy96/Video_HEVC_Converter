@@ -64,8 +64,16 @@ class Store:
         if size != st.st_size or abs(mtime - st.st_mtime) > 1.0:
             return False
         # Failed rows stay "done" so the same broken file isn't retried
-        # every scan. Users can retry via the "Retry failed" UI button.
+        # every scan. Users can wipe them via the Clear cache button.
         return status in ("ok", "skipped", "failed")
+
+    def status_map(self) -> dict[str, tuple[str, str | None]]:
+        """{path: (status, reason)} for every row in the cache."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT path, status, reason FROM processed"
+            ).fetchall()
+        return {p: (s, r) for (p, s, r) in rows}
 
     def record(self, path: Path, status: str, **fields) -> None:
         try:

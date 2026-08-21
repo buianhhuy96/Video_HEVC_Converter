@@ -342,8 +342,12 @@ def discover(cfg: Config, store: Store) -> int:
             all_media.append(item)
 
             if item["needs_convert"]:
-                # Cached OK/skip from a prior successful pass — don't re-queue.
+                # Cached OK/skip from a prior successful pass — don't re-queue,
+                # and reflect that in the library so the row's Status matches
+                # the fact that it isn't being queued.
                 if store.already_done(path):
+                    item["needs_convert"] = False
+                    item["skip_reason"] = "already processed (use Clear cache to re-probe)"
                     continue
                 pending.append({
                     k: item[k] for k in

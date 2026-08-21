@@ -29,6 +29,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import state
 from config import Config, load_config, save_config
+from store import Store
 
 log = logging.getLogger("webui")
 
@@ -765,10 +766,30 @@ def _render_pending() -> str:
 
 
 def _render_library() -> str:
-    """Everything the scanner found, HEVC or not; the Convert tab
-    handles the queue itself."""
+    """Everything the scanner found, HEVC or not. Reconciles each row's
+    Status against the actual pending queue + cache so nothing claims to
+    'need conversion' while sitting outside the Convert tab."""
+    items = state.get_all_media()
+    pending_paths = {it.get("path") for it in state.get_pending()}
+    try:
+        cfg = _load()
+        status_by_path = Store(cfg.runtime.state_db).status_map()
+    except Exception:  # noqa: BLE001
+        status_by_path = {}
+    reconciled: list[dict] = []
+    for it in items:
+        path = it.get("path")
+        if it.get("needs_convert") and path not in pending_paths:
+            cached = status_by_path.get(path)
+            it = {**it, "needs_convert": False}
+            if cached:
+                status, reason = cached
+                it["skip_reason"] = f"{status}: {reason}" if reason else status
+            else:
+                it["skip_reason"] = it.get("skip_reason") or "not queued"
+        reconciled.append(it)
     return _render_pending_table(
-        state.get_all_media(),
+        reconciled,
         "Nothing scanned yet. Click <b>Scan now</b> to discover videos.",
         show_status=True,
     )
