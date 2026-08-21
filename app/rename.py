@@ -466,11 +466,12 @@ def _new_file_node(current_path: Path) -> dict:
 
 
 def _new_folder_node(current_path: Path) -> dict:
+    proposed = _clean_title(current_path.name) or current_path.name
     return {
         "id": _node_id(str(current_path)),
         "type": "folder",
         "name": current_path.name,
-        "proposed": current_path.name,
+        "proposed": proposed,
         "path": str(current_path),
         "children": [],
     }
@@ -823,12 +824,19 @@ def compute_ops(tree: dict) -> list[dict]:
     return ordered
 
 
-def _rename_one(src: Path, dst: Path) -> None:
-    """Atomic same-filesystem rename with parent-dir creation."""
+def _rename_one(src: Path, dst: Path) -> bool:
+    """Atomic same-filesystem rename with parent-dir creation.
+
+    Returns True when a physical rename happened, False when the file was
+    already at `dst` (idempotent no-op — a prior Apply already moved it).
+    """
+    if not src.exists() and dst.exists():
+        return False
     if dst.exists():
         raise OSError(f"destination already exists: {dst}")
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
+    return True
 
 
 def apply_tree(tree: dict, log_path: Path) -> dict:
@@ -870,7 +878,7 @@ def apply_tree(tree: dict, log_path: Path) -> dict:
         # (already-renamed) parent.
         subs = _find_subtitles(src) if kind == "file" else []
         try:
-            _rename_one(src, dst)
+            renamed = _rename_one(src, dst)
         except OSError as e:
             fail_count += 1
             log.error("rename failed: %s -> %s (%s)", src, dst, e)
@@ -878,19 +886,23 @@ def apply_tree(tree: dict, log_path: Path) -> dict:
             continue
 
         ok_count += 1
-        performed.append({"src": op["src"], "dst": op["dst"], "kind": kind})
+        if renamed:
+            performed.append({"src": op["src"], "dst": op["dst"], "kind": kind})
+        else:
+            log.info("rename skipped (already at target): %s", dst)
 
         for sub in subs:
             tail = _subtitle_tail(sub, src.stem)
             sub_dst = dst.with_name(dst.stem + tail)
             try:
-                _rename_one(sub, sub_dst)
-                performed.append({"src": str(sub), "dst": str(sub_dst),
-                                  "kind": "subtitle"})
+                if _rename_one(sub, sub_dst):
+                    performed.append({"src": str(sub), "dst": str(sub_dst),
+                                      "kind": "subtitle"})
             except OSError as e:
                 log.warning("rename: sub failed %s -> %s (%s)", sub, sub_dst, e)
 
-        results.append({**op, "ok": True, "error": None})
+        results.append({**op, "ok": True, "error": None,
+                        "skipped": not renamed})
 
     if performed:
         _append_log(log_path, performed)
@@ -956,9 +968,9 @@ def undo_last(log_path: Path) -> dict:
                     dst.rmdir()
                 reverted += 1
             else:
-                _rename_one(Path(move["dst"]), Path(move["src"]))
+                if _rename_one(Path(move["dst"]), Path(move["src"])):
+                    undone.append(move)
                 reverted += 1
-                undone.append(move)
         except OSError as e:
             failures.append({"move": move, "error": str(e)})
             pending_moves = moves[:index + 1]

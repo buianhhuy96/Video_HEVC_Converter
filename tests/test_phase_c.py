@@ -16,6 +16,7 @@ import state  # noqa: E402
 import webui  # noqa: E402
 from rename import (  # noqa: E402
     _new_file_node,
+    _new_folder_node,
     apply_metadata_match,
     apply_tree,
     compute_ops,
@@ -369,6 +370,66 @@ class PendingRemapAfterRenameTests(unittest.TestCase):
             undo_last(log)
             self.assertEqual(state.get_pending()[0]["path"], str(src))
             self.assertTrue(src.exists())
+
+
+class FolderNameCleaningTests(unittest.TestCase):
+    """Dot-separated folder names ('Better.Call.Saul') should surface
+    space-separated in the Rename tab so users don't have to fix each one."""
+
+    def test_folder_proposed_converts_dots_to_spaces(self) -> None:
+        node = _new_folder_node(Path("/media/TVShows/Better.Call.Saul"))
+        self.assertEqual(node["name"], "Better.Call.Saul")
+        self.assertEqual(node["proposed"], "Better Call Saul")
+
+    def test_folder_proposed_leaves_clean_names_alone(self) -> None:
+        for name in ("Movies", "TVShows", "Season 01", "SS1"):
+            node = _new_folder_node(Path(f"/media/{name}"))
+            self.assertEqual(node["proposed"], name)
+
+
+class ApplyIsIdempotentTests(unittest.TestCase):
+    """Applying the same rename twice should not raise 'destination already
+    exists' — the second run should observe the file is already at its
+    target and no-op silently."""
+
+    def tearDown(self) -> None:
+        state.set_pending([])
+        state.set_all_media([])
+
+    def test_second_apply_of_same_op_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "Movie.2020.mkv"
+            src.write_bytes(b"payload")
+            log = Path(tmp) / "undo.log"
+            state.set_pending([{"path": str(src)}])
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "f1", "type": "file", "name": "Movie.2020.mkv",
+                    "ext": ".mkv", "kind": "movie",
+                    "path": str(src), "proposed": "Movie (2020).mkv",
+                    "parts": {"title": "Movie", "middle": "2020", "right": ""},
+                }],
+            }
+
+            first = apply_tree(tree, log)
+            self.assertEqual(first["failed"], 0)
+            self.assertEqual(first["applied"], 1)
+
+            # Same op again. Src no longer exists, dst does. Must not fail.
+            second = apply_tree(tree, log)
+            self.assertEqual(second["failed"], 0)
+            self.assertEqual(second["applied"], 1)
+            self.assertTrue(second["results"][0].get("skipped"))
+
+            # Undo log must contain only ONE batch — the second (no-op)
+            # apply must not add an entry that undo would then try to
+            # reverse.
+            with open(log, "r", encoding="utf-8") as f:
+                batches = [line for line in f if line.strip()]
+            self.assertEqual(len(batches), 1)
 
 
 if __name__ == "__main__":
