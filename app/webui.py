@@ -767,6 +767,7 @@ def _render_library() -> str:
     return _render_pending_table(
         state.get_all_media(),
         "Nothing scanned yet. Click <b>Scan now</b> to discover videos.",
+        show_status=True,
     )
 
 
@@ -846,9 +847,14 @@ def _legend_row(label: str, value: str, color: str) -> str:
 def _render_pending_table(
     items: list[dict], empty_msg: str, *,
     removable: bool = False, library_total: int | None = None,
-    remove_target: str = "#progress",
+    remove_target: str = "#progress", show_status: bool = False,
 ) -> str:
-    """Shared renderer for the Pending / Up-next tables."""
+    """Shared renderer for the Pending / Up-next tables.
+
+    `show_status=True` adds a Status column that surfaces per-item
+    `skip_reason` / `needs_convert` — used by the Scanned Library view so
+    users can tell WHY a file isn't in the conversion queue.
+    """
     if not items:
         if library_total:
             return (
@@ -866,12 +872,19 @@ def _render_pending_table(
             f" · <span class='text-slate-400'>"
             f"{len(items)} of {library_total} in library need conversion</span>"
         )
+    if show_status:
+        needs = sum(1 for x in items if x.get("needs_convert"))
+        lib_frag = (
+            f" · <span class='text-emerald-300'>{needs}</span>"
+            f"<span class='text-slate-400'> need conversion</span>"
+        )
     header = (
         "<div class='text-slate-300 text-sm mb-3'>"
         f"<b>{len(items)}</b> file(s) · total <b>{_fmt_bytes(total_bytes)}</b>"
         f"{lib_frag}"
         "</div>"
     )
+    status_th = "<th class='py-1 pr-3'>Status</th>" if show_status else ""
     action_th = "<th class='py-1 pr-3 w-6'></th>" if removable else ""
     thead = (
         "<thead><tr class='text-xs text-slate-400 text-left "
@@ -881,12 +894,26 @@ def _render_pending_table(
         "<th class='py-1 pr-3'>Resolution</th>"
         "<th class='py-1 pr-3'>Duration</th>"
         "<th class='py-1 pr-3'>Size</th>"
+        f"{status_th}"
         f"{action_th}"
         "</tr></thead>"
     )
     rows = []
     for it in items[:100]:
         res = f"{it.get('width', 0)}\u00d7{it.get('height', 0)}"
+        status_cell = ""
+        if show_status:
+            if it.get("needs_convert"):
+                status_cell = (
+                    "<td class='py-1 pr-3 text-xs text-emerald-300'>"
+                    "needs conversion</td>"
+                )
+            else:
+                reason = _esc(it.get("skip_reason") or "skipped")
+                status_cell = (
+                    "<td class='py-1 pr-3 text-xs text-slate-400 italic'>"
+                    f"{reason}</td>"
+                )
         remove_cell = ""
         if removable:
             p = _esc(it.get("path", ""))
@@ -907,6 +934,7 @@ def _render_pending_table(
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{res}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{_fmt_duration(it.get('duration'))}</td>"
             f"<td class='py-1 pr-3 text-xs text-slate-300'>{_fmt_bytes(it.get('size'))}</td>"
+            f"{status_cell}"
             f"{remove_cell}"
             "</tr>"
         )
