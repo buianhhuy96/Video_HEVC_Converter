@@ -795,5 +795,121 @@ class SplitAtStopsAtFolderSiblingTests(unittest.TestCase):
         self.assertEqual(names, ["S02E01.mkv", "S02E02.mkv"])
 
 
+class SubtitlesFollowVideoOnApplyTests(unittest.TestCase):
+    """Companion subtitle files (same stem, .srt/.ass/.vtt/…) must be
+    renamed or moved alongside the video during Apply, including cases
+    where the video crosses folders after a drag or a folder rename."""
+
+    def setUp(self) -> None:
+        state.set_pending([])
+        state.set_all_media([])
+
+    def test_simple_rename_moves_all_subtitle_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "Movie.2020.mkv"
+            src.write_bytes(b"x")
+            sub_plain = Path(tmp) / "Movie.2020.srt"
+            sub_lang = Path(tmp) / "Movie.2020.en.srt"
+            sub_forced = Path(tmp) / "Movie.2020.en.forced.srt"
+            for s in (sub_plain, sub_lang, sub_forced):
+                s.write_bytes(b"s")
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "f1", "type": "file", "name": "Movie.2020.mkv",
+                    "ext": ".mkv", "kind": "movie",
+                    "path": str(src), "proposed": "Movie (2020).mkv",
+                    "parts": {"title": "Movie", "middle": "2020", "right": ""},
+                }],
+            }
+            apply_tree(tree, Path(tmp) / "undo.log")
+
+            base = Path(tmp)
+            self.assertTrue((base / "Movie (2020).mkv").exists())
+            # Every subtitle keeps its language/kind tail but adopts the
+            # new video stem.
+            self.assertTrue((base / "Movie (2020).srt").exists())
+            self.assertTrue((base / "Movie (2020).en.srt").exists())
+            self.assertTrue((base / "Movie (2020).en.forced.srt").exists())
+            # And the originals are gone.
+            self.assertFalse(sub_plain.exists())
+            self.assertFalse(sub_lang.exists())
+            self.assertFalse(sub_forced.exists())
+
+    def test_cross_folder_move_carries_subtitle(self) -> None:
+        # Simulates the drag-and-drop workflow: the tree has the file
+        # under a different parent folder than the on-disk src, so Apply
+        # must move both the video AND the subtitle across folders.
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir = Path(tmp) / "ss1"
+            dst_dir = Path(tmp) / "Season 02"
+            src_dir.mkdir()
+            dst_dir.mkdir()
+            src = src_dir / "Tap 3.mkv"
+            sub = src_dir / "Tap 3.vi.srt"
+            src.write_bytes(b"v")
+            sub.write_bytes(b"s")
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "s2", "type": "folder", "name": "Season 02",
+                    "proposed": "Season 02", "path": str(dst_dir),
+                    "children": [{
+                        "id": "f1", "type": "file", "name": "Tap 3.mkv",
+                        "ext": ".mkv", "kind": "tv",
+                        "path": str(src),
+                        "proposed": "Show - S02E03.mkv",
+                        "parts": {"title": "Show", "middle": "S02E03", "right": ""},
+                    }],
+                }],
+            }
+            apply_tree(tree, Path(tmp) / "undo.log")
+
+            self.assertTrue((dst_dir / "Show - S02E03.mkv").exists())
+            self.assertTrue((dst_dir / "Show - S02E03.vi.srt").exists())
+            self.assertFalse(src.exists())
+            self.assertFalse(sub.exists())
+
+    def test_folder_rename_then_file_rename_carries_subtitle(self) -> None:
+        # The parent folder is renamed BEFORE the file inside it — the
+        # subtitle must still travel with the video even though it now
+        # lives under the newly-renamed parent.
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Better.Call.Saul"
+            folder.mkdir()
+            src = folder / "S01E01.mkv"
+            sub = folder / "S01E01.en.srt"
+            src.write_bytes(b"v")
+            sub.write_bytes(b"s")
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "d1", "type": "folder",
+                    "name": "Better.Call.Saul",
+                    "proposed": "Better Call Saul (2015)",
+                    "path": str(folder),
+                    "children": [{
+                        "id": "f1", "type": "file", "name": "S01E01.mkv",
+                        "ext": ".mkv", "kind": "tv",
+                        "path": str(src),
+                        "proposed": "Better Call Saul - S01E01.mkv",
+                        "parts": {"title": "Better Call Saul",
+                                    "middle": "S01E01", "right": ""},
+                    }],
+                }],
+            }
+            apply_tree(tree, Path(tmp) / "undo.log")
+
+            new_folder = Path(tmp) / "Better Call Saul (2015)"
+            self.assertTrue((new_folder / "Better Call Saul - S01E01.mkv").exists())
+            self.assertTrue((new_folder / "Better Call Saul - S01E01.en.srt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

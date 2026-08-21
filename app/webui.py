@@ -400,8 +400,8 @@ def _render_page(cfg: Config) -> str:
       </section>
 
       <section class='card'>
-        <h2 class='font-semibold mb-3 text-lg'>Pending conversion</h2>
-        <div id='pending' hx-get='/api/pending' hx-trigger='load, every 5s'>…</div>
+        <h2 class='font-semibold mb-3 text-lg'>Scanned library</h2>
+        <div id='library' hx-get='/api/library' hx-trigger='load, every 5s'>…</div>
       </section>
 
       <div class='grid md:grid-cols-1 gap-6'>
@@ -757,6 +757,16 @@ def _render_pending() -> str:
         "No files queued. Click <b>Scan now</b> to find candidates.",
         removable=True,
         library_total=state.all_media_count(),
+        remove_target="#progress",
+    )
+
+
+def _render_library() -> str:
+    """Everything the scanner found, HEVC or not; the Convert tab
+    handles the queue itself."""
+    return _render_pending_table(
+        state.get_all_media(),
+        "Nothing scanned yet. Click <b>Scan now</b> to discover videos.",
     )
 
 
@@ -836,6 +846,7 @@ def _legend_row(label: str, value: str, color: str) -> str:
 def _render_pending_table(
     items: list[dict], empty_msg: str, *,
     removable: bool = False, library_total: int | None = None,
+    remove_target: str = "#progress",
 ) -> str:
     """Shared renderer for the Pending / Up-next tables."""
     if not items:
@@ -884,7 +895,7 @@ def _render_pending_table(
                 f"<button type='button' class='text-red-400 hover:text-red-300 px-1' "
                 f"title='Exclude this file from conversion' "
                 f"hx-post='/api/pending/remove' hx-vals='{{\"path\": \"{p}\"}}' "
-                f"hx-target='#pending' hx-swap='innerHTML'"
+                f"hx-target='{remove_target}' hx-swap='innerHTML'"
                 ">&times;</button>"
                 "</td>"
             )
@@ -1142,7 +1153,9 @@ def _render_progress() -> str:
         "Nothing else waiting." if not idle
         else "Nothing in the queue yet."
     )
-    up_next_html = _render_pending_table(up_next, up_next_msg)
+    up_next_html = _render_pending_table(
+        up_next, up_next_msg, removable=True, remove_target="#progress",
+    )
 
     return f"""
     {current_block}
@@ -1668,12 +1681,17 @@ def api_pending(_: Auth) -> str:
     return _render_pending()
 
 
+@app.get("/api/library", response_class=HTMLResponse)
+def api_library(_: Auth) -> str:
+    return _render_library()
+
+
 @app.post("/api/pending/remove", response_class=HTMLResponse)
 def api_pending_remove(
     _: Auth, path: Annotated[str, Form()],
 ) -> str:
     state.remove_pending(path)
-    return _render_pending()
+    return _render_progress()
 
 
 # ---------------------------------------------------------------------------
