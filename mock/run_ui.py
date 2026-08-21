@@ -224,6 +224,12 @@ def _sample_all_media() -> list[dict]:
         {"path": "/media/TVShows/Series-A/Show.Name.S01E01.Pilot.1080p.WEB-DL.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2650,  "size": 1_400_000_000,  "bit_depth": 8},
         {"path": "/media/TVShows/Series-A/Show.Name.S01E02.The.Second.One.1080p.WEB-DL.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2670,  "size": 1_420_000_000,  "bit_depth": 8},
         {"path": "/media/TVShows/Series-A/Show.Name.S01E03.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2680,  "size": 1_450_000_000,  "bit_depth": 8},
+        # Drag-and-drop demo: a show with dirty season folders + Vietnamese
+        # bare-episode filenames. Drag one of these into a different season
+        # folder to see the Rename tab re-parse the season number live.
+        {"path": "/media/TVShows/Money.Heist/ss1/Tập 3.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2700, "size": 1_500_000_000, "bit_depth": 8},
+        {"path": "/media/TVShows/Money.Heist/ss1/Tập 5.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2700, "size": 1_510_000_000, "bit_depth": 8},
+        {"path": "/media/TVShows/Money.Heist/ss2/Tập 1.mkv", "codec": "hevc", "width": 1920, "height": 1080, "duration": 2700, "size": 1_520_000_000, "bit_depth": 8},
     ]
     items = []
     for it in _sample_pending():

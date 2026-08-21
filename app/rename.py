@@ -695,14 +695,176 @@ def _find_chain(root: dict, node_id: str,
     return None
 
 
+def _classify_ancestors(ancestors: list[dict]) -> tuple[dict | None, dict | None]:
+    """Return (show_folder, season_folder) from a file's ancestor chain.
+
+    `season_folder` is the immediate parent when it's a `Season NN` or
+    `Specials` folder; otherwise None. `show_folder` is the folder above
+    the season folder if there is one, else the immediate parent — as
+    long as it's not the tree root (renaming the root is disallowed).
+    """
+    if not ancestors:
+        return None, None
+    parent = ancestors[-1]
+    parent_name = (parent.get("proposed") or parent.get("name") or "").strip()
+    if _is_season_or_specials(parent_name):
+        season_folder = parent
+        show_folder = None
+        if len(ancestors) >= 2 and not ancestors[-2].get("is_root"):
+            show_folder = ancestors[-2]
+        return show_folder, season_folder
+    if parent.get("is_root"):
+        return None, None
+    return parent, None
+
+
+def _reparse_file_in_tree(root: dict, node_id: str) -> None:
+    """Re-run the filename parser as if the file lived at its current
+    IN-TREE location. The parent chain is authoritative for show name
+    and (when a season folder is above the file) season number; the
+    filename contributes the episode number and episode title. Refreshes
+    `parts`, `kind`, `confidence`, and `proposed` in place; invalidates
+    any prior TMDB match since the show context may have changed."""
+    chain = _find_chain(root, node_id)
+    if not chain or len(chain) < 2:
+        return
+    node = chain[-1]
+    if node.get("type") != "file":
+        return
+
+    ancestors = chain[:-1]
+    virtual = Path(ancestors[0].get("path") or "/")
+    for ancestor in ancestors[1:]:
+        virtual = virtual / (ancestor.get("proposed") or ancestor.get("name") or "")
+    virtual = virtual / node["name"]
+
+    parsed = parse_filename(virtual)
+    ext = node.get("ext") or virtual.suffix
+
+    show_folder, season_folder = _classify_ancestors(ancestors)
+    show_name: str | None = None
+    if show_folder is not None:
+        show_name = _clean_title(
+            show_folder.get("proposed") or show_folder.get("name") or ""
+        ) or None
+    parent_season: int | None = None
+    if season_folder is not None:
+        season_folder_name = (
+            season_folder.get("proposed") or season_folder.get("name") or ""
+        ).strip()
+        parent_season = _season_number(season_folder_name)
+        if parent_season is None and _SPECIALS_FOLDER.match(season_folder_name):
+            parent_season = 0
+
+    if show_name is not None:
+        # Parent chain wins for title (and season if a season folder is in
+        # the chain). Fall back to parse_filename for episode extraction,
+        # and if the parser found nothing try the bare-episode hints.
+        season = parent_season if parent_season is not None else parsed.season
+        episode = parsed.episode
+        episode_end = parsed.episode_end
+        episode_title = parsed.episode_title
+        if episode is None:
+            hit = _extract_episode_number(virtual.stem)
+            if hit is not None:
+                episode = hit[0]
+                episode_end = None
+                start, end = hit[1]
+                stem = virtual.stem
+                leftover = " ".join(
+                    chunk for chunk in (
+                        stem[:start].rstrip(" .-_"),
+                        stem[end:].strip(" .-_"),
+                    ) if chunk
+                )
+                episode_title = _clean_title(leftover) or None
+        if episode is not None and season is None:
+            season = 1  # Jellyfin-style default when no season context.
+
+        if episode is not None and season is not None:
+            label = f"S{season:02d}E{episode:02d}"
+            if episode_end and episode_end != episode:
+                label += f"-E{episode_end:02d}"
+            new_parts = {
+                "title": show_name,
+                "middle": label,
+                "right": episode_title or "",
+            }
+            node["kind"] = "tv"
+            node["confidence"] = "medium"
+            note = None
+        else:
+            new_parts = {"title": show_name, "middle": "", "right": ""}
+            node["kind"] = "unknown"
+            node["confidence"] = "low"
+            note = "no episode number found in filename"
+        node["parts"] = new_parts
+        node["proposed"] = rebuild_proposed(new_parts, ext, node["name"])
+        node.pop("metadata_match", None)
+        node["note"] = note
+        return
+
+    # No show ancestor (file lives at the tree root): fall back to the raw
+    # parser output so scan-time behavior is preserved for edge cases.
+    new_parts = _parts_from_parsed(virtual, parsed)
+    node["parts"] = new_parts
+    node["kind"] = parsed.kind
+    node["confidence"] = parsed.confidence
+    node["proposed"] = rebuild_proposed(new_parts, ext, node["name"])
+    node.pop("metadata_match", None)
+    node["note"] = (
+        "show inferred from parent folder"
+        if parsed.kind == "tv"
+        and parsed.season is not None
+        and parsed.episode is not None
+        and not parsed.title
+        else None if parsed.title else "could not parse filename"
+    )
+
+
+def move_node(root: dict, source_id: str, target_folder_id: str) -> bool:
+    """Move a file `source_id` under `target_folder_id`. Returns True on
+    success. The file is re-parsed with the new parent context: show
+    name and (if the drop target is a season folder) season number come
+    from the ancestor chain, while the filename still supplies the
+    episode number. Rejects: root moves, folder sources, drops onto a
+    file, and no-op same-parent drops.
+    """
+    if not source_id or not target_folder_id or source_id == target_folder_id:
+        return False
+    source = find_node(root, source_id)
+    target = find_node(root, target_folder_id)
+    if source is None or target is None:
+        return False
+    if source.get("type") != "file":
+        return False
+    if target.get("type") != "folder":
+        return False
+
+    source_parent = _find_parent(root, source_id)
+    if source_parent is None or source_parent.get("id") == target_folder_id:
+        return False
+
+    source_parent["children"] = [
+        c for c in source_parent["children"] if c["id"] != source_id
+    ]
+    target.setdefault("children", []).append(source)
+    _reparse_file_in_tree(root, source_id)
+    return True
+
+
+
+
 def split_at_ancestor(root: dict, node_id: str, target_depth: int) -> dict | None:
     """Insert a new folder at `target_depth` in the tree relative to `node_id`.
 
     Depth is 1-based, excluding the invisible root (so target_depth=1 is
     root's direct children, =2 is grandchildren, etc.).
 
-        - If target_depth == node's own depth: replace the node and all following
-            siblings with a new folder containing that extracted tail.
+    - If target_depth == node's own depth: create a new folder in place
+      of the clicked node and adopt the run of following FILE siblings.
+      Extraction stops at the first folder sibling so an existing
+      `Season 2/` next to loose S01 episodes is not swept in.
     - If target_depth < node's own depth: create a new folder as the sibling
       immediately AFTER the ancestor at `target_depth`. The node's own
       chain-ancestor at (target_depth + 1) — plus every one of its
@@ -722,11 +884,16 @@ def split_at_ancestor(root: dict, node_id: str, target_depth: int) -> dict | Non
     if target_depth == node_depth:
         parent = chain[target_depth - 1]
         idx = parent["children"].index(clicked)
-        extracted = parent["children"][idx:]
+        end = idx + 1
+        if clicked.get("type") == "file":
+            while (end < len(parent["children"])
+                   and parent["children"][end].get("type") == "file"):
+                end += 1
+        extracted = parent["children"][idx:end]
         new_folder = _new_empty_folder(suggested_name)
         new_folder["children"] = extracted
         new_folder["_extracted_from"] = parent["id"]
-        parent["children"][idx:] = [new_folder]
+        parent["children"][idx:end] = [new_folder]
         return new_folder
 
     target_ancestor = chain[target_depth]

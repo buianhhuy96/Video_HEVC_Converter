@@ -20,7 +20,10 @@ from rename import (  # noqa: E402
     apply_metadata_match,
     apply_tree,
     compute_ops,
+    find_node,
     metadata_search_context,
+    move_node,
+    split_at_ancestor,
     undo_last,
 )
 
@@ -548,6 +551,248 @@ class UndoOnlyReversesLastApplyTests(unittest.TestCase):
             self.assertTrue(mid.exists())
             self.assertFalse(final.exists())
             self.assertEqual(state.get_pending()[0]["path"], str(mid))
+
+
+class DragMoveRepararsesInNewContextTests(unittest.TestCase):
+    """Dragging a file to a different folder should re-run the parser
+    against the new parent context (season number, show name), not just
+    reparent the row."""
+
+    @staticmethod
+    def _show_tree() -> dict:
+        """Build a two-season tree: Show / (Season 01, Season 02)."""
+        return {
+            "id": "root", "type": "folder", "name": "TVShows",
+            "proposed": "TVShows", "path": "/media/TVShows",
+            "is_root": True,
+            "children": [{
+                "id": "show", "type": "folder", "name": "Money.Heist",
+                "proposed": "Money Heist", "path": "/media/TVShows/Money.Heist",
+                "children": [
+                    {
+                        "id": "s1", "type": "folder", "name": "ss1",
+                        "proposed": "Season 01",
+                        "path": "/media/TVShows/Money.Heist/ss1",
+                        "children": [_new_file_node(
+                            Path("/media/TVShows/Money.Heist/ss1/Tập 3.mkv")
+                        )],
+                    },
+                    {
+                        "id": "s2", "type": "folder", "name": "ss2",
+                        "proposed": "Season 02",
+                        "path": "/media/TVShows/Money.Heist/ss2",
+                        "children": [],
+                    },
+                ],
+            }],
+        }
+
+    def test_drop_across_seasons_updates_episode_marker(self) -> None:
+        tree = self._show_tree()
+        # Sanity: the file in ss1 starts as S01E03 (inferred from ss1 + Tập 3).
+        s1 = find_node(tree, "s1")
+        file_node = s1["children"][0]
+        self.assertEqual(file_node["parts"]["middle"], "S01E03")
+        source_id = file_node["id"]
+
+        self.assertTrue(move_node(tree, source_id, "s2"))
+
+        # After the drop, the file lives under Season 02 and its middle
+        # field reflects the new season.
+        s2 = find_node(tree, "s2")
+        self.assertEqual(len(s1["children"]), 0)
+        self.assertEqual(len(s2["children"]), 1)
+        moved = s2["children"][0]
+        self.assertEqual(moved["parts"]["middle"], "S02E03")
+        self.assertEqual(moved["parts"]["title"], "Money Heist")
+
+    def test_drop_rejects_no_op_same_parent(self) -> None:
+        tree = self._show_tree()
+        source_id = find_node(tree, "s1")["children"][0]["id"]
+        self.assertFalse(move_node(tree, source_id, "s1"))
+
+    def test_drop_rejects_folder_into_own_descendant_cycle(self) -> None:
+        tree = self._show_tree()
+        # Trying to drop the show folder into one of its own seasons
+        # would create a cycle — must be rejected.
+        self.assertFalse(move_node(tree, "show", "s1"))
+
+    def test_drop_rejects_root(self) -> None:
+        tree = self._show_tree()
+        self.assertFalse(move_node(tree, "root", "s1"))
+
+    def test_drop_invalidates_prior_tmdb_match(self) -> None:
+        tree = self._show_tree()
+        s1 = find_node(tree, "s1")
+        file_node = s1["children"][0]
+        file_node["metadata_match"] = {"provider": "tmdb", "id": "123",
+                                        "media_type": "tv"}
+
+        move_node(tree, file_node["id"], "s2")
+
+        s2 = find_node(tree, "s2")
+        self.assertNotIn("metadata_match", s2["children"][0])
+
+
+class DragMoveAcrossShowsTests(unittest.TestCase):
+    """Files/folders dragged into a different show inherit the new show
+    from the parent chain and, when a season folder is in the chain, its
+    season number too. The filename supplies the episode number."""
+
+    @staticmethod
+    def _two_show_tree() -> dict:
+        return {
+            "id": "root", "type": "folder", "name": "TVShows",
+            "proposed": "TVShows", "path": "/media/TVShows",
+            "is_root": True,
+            "children": [
+                {
+                    "id": "show1", "type": "folder", "name": "Money.Heist",
+                    "proposed": "Money Heist",
+                    "path": "/media/TVShows/Money.Heist",
+                    "children": [
+                        {
+                            "id": "m_s1", "type": "folder", "name": "ss1",
+                            "proposed": "Season 01",
+                            "path": "/media/TVShows/Money.Heist/ss1",
+                            "children": [
+                                _new_file_node(Path(
+                                    "/media/TVShows/Money.Heist/ss1/Tập 3.mkv"
+                                )),
+                                _new_file_node(Path(
+                                    "/media/TVShows/Money.Heist/ss1/Tập 5.mkv"
+                                )),
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "id": "show2", "type": "folder", "name": "Series-A",
+                    "proposed": "Series - A",
+                    "path": "/media/TVShows/Series-A",
+                    "children": [
+                        _new_file_node(Path(
+                            "/media/TVShows/Series-A/Show.Name.S01E02.The.Second.One.mkv"
+                        )),
+                    ],
+                },
+                {
+                    "id": "show3", "type": "folder", "name": "Series-B",
+                    "proposed": "Series - B",
+                    "path": "/media/TVShows/Series-B",
+                    "children": [],
+                },
+            ],
+        }
+
+    def test_file_into_show_root_uses_parent_title_and_preserves_episode(
+        self,
+    ) -> None:
+        tree = self._two_show_tree()
+        source_id = find_node(tree, "m_s1")["children"][0]["id"]  # Tập 3.mkv
+
+        self.assertTrue(move_node(tree, source_id, "show2"))
+
+        moved = find_node(tree, "show2")["children"][-1]
+        # Parent chain wins for title; filename bare-episode ('Tập 3')
+        # supplies episode 3; no season folder in the chain, so we
+        # Jellyfin-default to season 1.
+        self.assertEqual(moved["parts"]["title"], "Series - A")
+        self.assertEqual(moved["parts"]["middle"], "S01E03")
+
+    def test_file_with_sxxexx_into_different_show_season_uses_chain(
+        self,
+    ) -> None:
+        tree = self._two_show_tree()
+        # Take the SxxExx-named file and drop it into Money.Heist/ss1.
+        source_id = find_node(tree, "show2")["children"][0]["id"]
+
+        self.assertTrue(move_node(tree, source_id, "m_s1"))
+
+        moved = find_node(tree, "m_s1")["children"][-1]
+        # Title comes from the show ancestor (Money.Heist), season from
+        # the ss1 season folder (=01), episode from the filename (02),
+        # and the episode title from the filename ('The Second One').
+        self.assertEqual(moved["parts"]["title"], "Money Heist")
+        self.assertEqual(moved["parts"]["middle"], "S01E02")
+        self.assertEqual(moved["parts"]["right"], "The Second One")
+
+    def test_folder_sources_are_rejected(self) -> None:
+        # Only files are draggable; folder moves must be a no-op even
+        # when POSTed directly to the API.
+        tree = self._two_show_tree()
+        self.assertFalse(move_node(tree, "m_s1", "show3"))
+        self.assertFalse(move_node(tree, "show1", "show3"))
+
+
+class SplitAtStopsAtFolderSiblingTests(unittest.TestCase):
+    """Clicking `+` on a loose file should group the file and any
+    following FILE siblings into a new folder — an existing sibling
+    folder must NOT be swept in."""
+
+    @staticmethod
+    def _mixed_tree() -> dict:
+        return {
+            "id": "root", "type": "folder", "name": "TVShows",
+            "proposed": "TVShows", "path": "/media/TVShows",
+            "is_root": True,
+            "children": [{
+                "id": "show", "type": "folder", "name": "Show 1",
+                "proposed": "Show 1", "path": "/media/TVShows/Show 1",
+                "children": [
+                    _new_file_node(Path("/media/TVShows/Show 1/S01E01.mkv")),
+                    _new_file_node(Path("/media/TVShows/Show 1/S01E02.mkv")),
+                    {
+                        "id": "s2", "type": "folder", "name": "Season 2",
+                        "proposed": "Season 02",
+                        "path": "/media/TVShows/Show 1/Season 2",
+                        "children": [
+                            _new_file_node(
+                                Path("/media/TVShows/Show 1/Season 2/S02E01.mkv")
+                            ),
+                            _new_file_node(
+                                Path("/media/TVShows/Show 1/Season 2/S02E02.mkv")
+                            ),
+                        ],
+                    },
+                ],
+            }],
+        }
+
+    def test_split_on_file_stops_at_first_folder_sibling(self) -> None:
+        tree = self._mixed_tree()
+        show = find_node(tree, "show")
+        s01e01_id = show["children"][0]["id"]
+        # chain=[root, show, file] → node_depth=2; target_depth=2 means
+        # "make a new folder in place of the clicked file".
+        new_folder = split_at_ancestor(tree, s01e01_id, target_depth=2)
+
+        assert new_folder is not None
+        # The show folder now has TWO children: the new folder and the
+        # untouched Season 2 folder, in that order.
+        self.assertEqual(len(show["children"]), 2)
+        self.assertIs(show["children"][0], new_folder)
+        season_2 = show["children"][1]
+        self.assertEqual(season_2["id"], "s2")
+        # The new folder holds only the two loose S01 files.
+        names = [c["name"] for c in new_folder["children"]]
+        self.assertEqual(names, ["S01E01.mkv", "S01E02.mkv"])
+        # Season 2 is untouched.
+        self.assertEqual(len(season_2["children"]), 2)
+
+    def test_split_on_lone_file_wraps_only_itself(self) -> None:
+        tree = self._mixed_tree()
+        s2 = find_node(tree, "s2")
+        s02e01_id = s2["children"][0]["id"]
+        # chain=[root, show, s2, file] → node_depth=3; all siblings from
+        # S02E01 onward are files, so all get consumed.
+        new_folder = split_at_ancestor(tree, s02e01_id, target_depth=3)
+
+        assert new_folder is not None
+        self.assertEqual(len(s2["children"]), 1)
+        self.assertIs(s2["children"][0], new_folder)
+        names = [c["name"] for c in new_folder["children"]]
+        self.assertEqual(names, ["S02E01.mkv", "S02E02.mkv"])
 
 
 if __name__ == "__main__":

@@ -1915,6 +1915,24 @@ def api_rename_add_folder(
     return _render_rename(_load())
 
 
+@app.post("/api/rename/move", response_class=HTMLResponse)
+def api_rename_move(
+    _: Auth,
+    source_id: Annotated[str, Form()],
+    target_folder_id: Annotated[str, Form()],
+) -> str:
+    """Drag-and-drop reparent: move source under target folder and, for
+    files, re-parse with the new parent context so SxxExx/show reflect
+    the drop target."""
+    from rename import move_node
+    tree = state.get_rename_tree()
+    if not tree:
+        return _render_rename(_load())
+    if move_node(tree, source_id, target_folder_id):
+        state.set_rename_tree(tree)
+    return _render_rename(_load())
+
+
 @app.post("/api/rename/split_at", response_class=HTMLResponse)
 def api_rename_split_at(
     _: Auth,
@@ -2141,13 +2159,19 @@ def _render_tree_node(node: dict, depth: int = 0, index_in_parent: int = 0) -> s
             f"hx-target='#rename-preview' hx-swap='innerHTML'>\u00d7</button>"
         )
 
+    # File rows are draggable via the "current filename" column (col 2)
+    # rather than the whole row — the col-3 inputs would otherwise absorb
+    # the mousedown for text selection.
+    col2_draggable = "draggable='true'" if node["type"] == "file" else ""
     row = (
         f"<div class='vhc-rename-row grid gap-3 py-1 border-b border-slate-800 "
-        f"{row_bg} items-start'>"
+        f"{row_bg} items-start' "
+        f"data-node-id='{node_id}' data-node-type='{_esc(node['type'])}' "
+        f"data-is-root='{'true' if is_root else 'false'}'>"
         # COL 1: confidence dot
-        f"<div class='pt-1.5 flex justify-center'>{conf_badge}</div>"
-        # COL 2: depth pluses + icon + current name + (delete if new)
-        f"<div class='flex items-center gap-0 min-w-0'>"
+        f"<div class='pt-1.5 flex items-center justify-center'>{conf_badge}</div>"
+        # COL 2: depth pluses + icon + current name + (delete if new) — drag handle for files
+        f"<div class='vhc-rename-handle flex items-center gap-0 min-w-0' {col2_draggable}>"
         f"{plus_grid}"
         f"<span class='text-slate-500 text-sm ml-1'>{icon}</span>"
         f"<div class='min-w-0 flex-1 ml-1'>"
@@ -2305,6 +2329,20 @@ def _render_rename(cfg: Config, banner: str = "") -> str:
     #vhc-rename-tree .vhc-match-option[data-active='true'] {
         background: rgb(30, 64, 84);
     }
+    #vhc-rename-tree .vhc-rename-handle[draggable='true'] {
+        cursor: grab;
+    }
+    #vhc-rename-tree .vhc-rename-handle[draggable='true']:active {
+        cursor: grabbing;
+    }
+    #vhc-rename-tree .vhc-rename-row.vhc-drop-hover {
+        outline: 2px dashed rgb(56, 189, 248);
+        outline-offset: -2px;
+        background: rgba(56, 189, 248, 0.08);
+    }
+    #vhc-rename-tree .vhc-rename-row.vhc-drag-source {
+        opacity: 0.4;
+    }
 </style>
 <script>
 (function() {
@@ -2443,6 +2481,62 @@ def _render_rename(cfg: Config, banner: str = "") -> str:
         list.dataset.activeIndex = '-1';
         input.setAttribute('aria-expanded', hasContent ? 'true' : 'false');
         input.removeAttribute('aria-activedescendant');
+    });
+
+    if (window.vhcRenameDragReady) return;
+    window.vhcRenameDragReady = true;
+
+    function clearDropHover() {
+        document.querySelectorAll('.vhc-rename-row.vhc-drop-hover')
+            .forEach(function(el) { el.classList.remove('vhc-drop-hover'); });
+    }
+
+    document.addEventListener('dragstart', function(event) {
+        var row = event.target.closest && event.target.closest('.vhc-rename-row');
+        if (!row || row.dataset.nodeType !== 'file') return;
+        event.dataTransfer.setData('text/plain', row.dataset.nodeId);
+        event.dataTransfer.effectAllowed = 'move';
+        row.classList.add('vhc-drag-source');
+    });
+
+    document.addEventListener('dragend', function(event) {
+        var row = event.target.closest && event.target.closest('.vhc-rename-row');
+        if (row) row.classList.remove('vhc-drag-source');
+        clearDropHover();
+    });
+
+    document.addEventListener('dragover', function(event) {
+        var row = event.target.closest && event.target.closest('.vhc-rename-row');
+        if (!row || row.dataset.nodeType !== 'folder') return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        if (!row.classList.contains('vhc-drop-hover')) {
+            clearDropHover();
+            row.classList.add('vhc-drop-hover');
+        }
+    });
+
+    document.addEventListener('dragleave', function(event) {
+        var row = event.target.closest && event.target.closest('.vhc-rename-row');
+        if (row && !row.contains(event.relatedTarget)) {
+            row.classList.remove('vhc-drop-hover');
+        }
+    });
+
+    document.addEventListener('drop', function(event) {
+        var row = event.target.closest && event.target.closest('.vhc-rename-row');
+        if (!row || row.dataset.nodeType !== 'folder') return;
+        event.preventDefault();
+        clearDropHover();
+        var sourceId = event.dataTransfer.getData('text/plain');
+        if (!sourceId || sourceId === row.dataset.nodeId) return;
+        if (window.htmx) {
+            htmx.ajax('POST', '/api/rename/move', {
+                target: '#rename-preview',
+                swap: 'innerHTML',
+                values: { source_id: sourceId, target_folder_id: row.dataset.nodeId },
+            });
+        }
     });
 })();
 </script>
