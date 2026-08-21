@@ -79,6 +79,11 @@ def _clean_title(raw: str) -> str:
     s = re.sub(r"[._]+", " ", s)
     s = re.sub(r"\s*-\s*", " - ", s)
     s = re.sub(r"\s+", " ", s).strip(" -")
+    # A left-side clip at a release marker (e.g. "Uno (1080p..." cut at
+    # "1080p") can leave a dangling opener behind; strip unmatched brackets
+    # so parsed parts don't emit "Uno (" as the episode title.
+    s = re.sub(r"\s*[\(\[\{]\s*$", "", s)
+    s = re.sub(r"^\s*[\)\]\}]\s*", "", s)
     return s
 
 

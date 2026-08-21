@@ -174,6 +174,18 @@ class RenameMetadataTests(unittest.TestCase):
             "The Office (2005) - S01E05.mkv",
         )
 
+    def test_episode_title_drops_dangling_open_paren_before_release_tag(self) -> None:
+        """When the release-info tag opens with '(1080p ...)' the parser
+        cuts before the release marker; the leftover unmatched '(' must
+        not survive into the episode-title field."""
+        node = _new_file_node(Path(
+            "/media/TVShows/Better.Call.Saul/SS1/"
+            "Better Call Saul (2015) - S01E01 - Uno (1080p BluRay 10bit HEVC x265).mkv"
+        ))
+        self.assertEqual(node["parts"]["title"], "Better Call Saul (2015)")
+        self.assertEqual(node["parts"]["middle"], "S01E01")
+        self.assertEqual(node["parts"]["right"], "Uno")
+
     def test_bare_tv_episode_under_season_uses_series_folder(self) -> None:
         node = _new_file_node(
             Path("/media/TVShows/The Office/Season 01/S01E06.mkv"),
