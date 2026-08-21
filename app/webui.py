@@ -387,11 +387,17 @@ def _render_page(cfg: Config) -> str:
     <section id='tab-setup' class='tab-content space-y-6'>
       <div class='flex items-center gap-3 flex-wrap'>
         <button class='btn btn-primary' hx-post='/api/scan' hx-swap='none'>Scan now</button>
+        <form method='post' action='/api/state/clear_cache' class='inline'>
+          <button class='btn btn-ghost'
+                  onclick="return confirm('Wipe the whole processed-file cache? Every file will be re-probed on the next scan.')">
+            Clear cache
+          </button>
+        </form>
         <button type='button' class='btn btn-ghost'
                 onclick='vhcOpenFileBrowser()'>Convert one file…</button>
         <span class='text-slate-400 text-sm'>
-          Scan populates the Pending list. "Convert one file…" queues a single
-          file and starts encoding immediately — useful for testing settings.
+          Scan populates the Pending list. Clear cache forgets every prior
+          probe result so the next scan re-decides from scratch.
         </span>
       </div>
 
@@ -694,9 +700,6 @@ def _render_page(cfg: Config) -> str:
     <section id='tab-status' class='tab-content space-y-6 hidden'>
       <div class='flex items-center justify-between'>
         <h2 class='font-semibold text-lg'>Library status</h2>
-        <form method='post' action='/api/state/clear_failed' class='inline'>
-          <button class='btn btn-ghost' onclick="return confirm('Clear failed rows from state DB so they get retried?')">Retry failed</button>
-        </form>
       </div>
 
       <section class='card'>
@@ -2677,11 +2680,11 @@ def api_settings(
     return RedirectResponse("/", status_code=303)
 
 
-@app.post("/api/state/clear_failed")
-def api_clear_failed(_: Auth) -> RedirectResponse:
+@app.post("/api/state/clear_cache")
+def api_clear_cache(_: Auth) -> RedirectResponse:
     cfg = _load()
     with sqlite3.connect(cfg.runtime.state_db) as c:
-        c.execute("DELETE FROM processed WHERE status='failed'")
+        c.execute("DELETE FROM processed")
     return RedirectResponse("/", status_code=303)
 
 
