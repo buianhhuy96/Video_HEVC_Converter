@@ -176,9 +176,14 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
     # Prevent silent packet drops when the HW pipeline pushes bursts faster
     # than the muxer normally accepts; and keep container timestamps
     # monotonic even if the source has negative or reordered PTS.
+    # -max_interleave_delta 0 forces matroska to never abandon interleaving
+    # while -avoid_negative_ts resolves QSV's negative initial DTS; the
+    # default 10s ceiling produced huge single-stream runs on long encodes,
+    # breaking index-based seeking.
     args += [
         "-max_muxing_queue_size", "9999",
         "-avoid_negative_ts", "make_zero",
+        "-max_interleave_delta", "0",
     ]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
