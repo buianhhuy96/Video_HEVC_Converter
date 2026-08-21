@@ -146,8 +146,9 @@ def _search_mock(query: str, media_type: SearchType) -> list[MediaMatch]:
 
 
 def _search_tmdb(query: str, media_type: SearchType,
-                 year: int | None, language: str) -> list[MediaMatch]:
-    token = os.environ.get("TMDB_API_TOKEN", "").strip()
+                 year: int | None, language: str,
+                 token: str = "") -> list[MediaMatch]:
+    token = (token or os.environ.get("TMDB_API_TOKEN", "")).strip()
     if not token:
         raise LookupUnavailable("TMDB title matching is not configured")
 
@@ -182,7 +183,8 @@ def _search_tmdb(query: str, media_type: SearchType,
 
 
 def search_media(query: str, media_type: SearchType = "any",
-                 year: int | None = None, limit: int = 8) -> list[MediaMatch]:
+                 year: int | None = None, limit: int = 8,
+                 *, token: str = "", language: str = "") -> list[MediaMatch]:
     """Return ranked movie/show title matches without exposing provider secrets."""
     if media_type not in ("movie", "tv", "any"):
         media_type = "any"
@@ -191,7 +193,7 @@ def search_media(query: str, media_type: SearchType = "any",
         return []
 
     provider = provider_name()
-    language = os.environ.get("TMDB_LANGUAGE", "en-US").strip() or "en-US"
+    language = (language or os.environ.get("TMDB_LANGUAGE", "en-US")).strip() or "en-US"
     cache_key = (provider, query.casefold(), media_type, year, language)
     now = time.monotonic()
     with _CACHE_LOCK:
@@ -202,7 +204,7 @@ def search_media(query: str, media_type: SearchType = "any",
     if provider == "mock":
         matches = _search_mock(query, media_type)
     else:
-        matches = _search_tmdb(query, media_type, year, language)
+        matches = _search_tmdb(query, media_type, year, language, token)
     ranked = tuple(_rank(matches, query, media_type, year)[:20])
 
     with _CACHE_LOCK:

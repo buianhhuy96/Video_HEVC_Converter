@@ -57,6 +57,14 @@ class ValidationCfg:
 
 
 @dataclass
+class MetadataCfg:
+    # TMDB v4 "Read Access Token" (JWT-style). UI value takes precedence
+    # over $TMDB_API_TOKEN; leave empty to fall back to the env var.
+    tmdb_api_token: str = ""
+    tmdb_language: str = "en-US"
+
+
+@dataclass
 class RuntimeCfg:
     delete_original: bool = True
     work_dir: str = "/tmp/convert"
@@ -85,6 +93,7 @@ class Config:
     encoder: EncoderCfg = field(default_factory=EncoderCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     validation: ValidationCfg = field(default_factory=ValidationCfg)
+    metadata: MetadataCfg = field(default_factory=MetadataCfg)
     runtime: RuntimeCfg = field(default_factory=RuntimeCfg)
 
 
@@ -118,6 +127,7 @@ def load_config(path: str | None = None) -> Config:
     cfg.encoder = _merge_section(cfg.encoder, raw.get("encoder"))
     cfg.output = _merge_section(cfg.output, raw.get("output"))
     cfg.validation = _merge_section(cfg.validation, raw.get("validation"))
+    cfg.metadata = _merge_section(cfg.metadata, raw.get("metadata"))
     cfg.runtime = _merge_section(cfg.runtime, raw.get("runtime"))
 
     Path(cfg.runtime.work_dir).mkdir(parents=True, exist_ok=True)
@@ -133,7 +143,7 @@ def load_config(path: str | None = None) -> Config:
 
 # Only these top-level sections can be written from the UI. Anything else in
 # config.yaml is left as-is on disk.
-_EDITABLE_SECTIONS = ("scan_paths", "encoder", "output", "runtime")
+_EDITABLE_SECTIONS = ("scan_paths", "encoder", "output", "runtime", "metadata")
 
 
 def _cfg_to_dict(cfg: Config) -> dict:
@@ -142,6 +152,7 @@ def _cfg_to_dict(cfg: Config) -> dict:
         "encoder": dict(cfg.encoder.__dict__),
         "output": dict(cfg.output.__dict__),
         "runtime": dict(cfg.runtime.__dict__),
+        "metadata": dict(cfg.metadata.__dict__),
     }
 
 

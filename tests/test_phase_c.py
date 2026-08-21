@@ -44,9 +44,11 @@ class MediaLookupTests(unittest.TestCase):
 
     def test_tmdb_search_does_not_hard_filter_existing_year(self) -> None:
         urls: list[str] = []
+        auth: list[str] = []
 
         def fake_urlopen(request, timeout):
             urls.append(request.full_url)
+            auth.append(request.get_header("Authorization"))
             return _Response()
 
         with patch.dict(os.environ, {"TMDB_API_TOKEN": "test-token"}):
@@ -55,6 +57,28 @@ class MediaLookupTests(unittest.TestCase):
 
         self.assertNotIn("year=", urls[0])
         self.assertNotIn("first_air_date_year", urls[0])
+        self.assertEqual(auth[0], "Bearer test-token")
+
+    def test_explicit_token_arg_overrides_env(self) -> None:
+        auth: list[str] = []
+
+        def fake_urlopen(request, timeout):
+            auth.append(request.get_header("Authorization"))
+            return _Response()
+
+        with patch.dict(os.environ, {"TMDB_API_TOKEN": "env-token"}):
+            with patch.object(media_lookup, "urlopen", fake_urlopen):
+                media_lookup._search_tmdb(
+                    "The Office", "tv", 2005, "en-US", token="explicit-token",
+                )
+
+        self.assertEqual(auth[0], "Bearer explicit-token")
+
+    def test_search_media_without_token_or_env_reports_unavailable(self) -> None:
+        with patch.dict(os.environ, {"TMDB_API_TOKEN": ""}, clear=False):
+            os.environ.pop("TMDB_API_TOKEN", None)
+            with self.assertRaises(media_lookup.LookupUnavailable):
+                media_lookup._search_tmdb("Foo", "movie", None, "en-US")
 
     def test_tmdb_normalization_excludes_people(self) -> None:
         payload = {
@@ -222,6 +246,24 @@ class RenameMetadataTests(unittest.TestCase):
         self.assertIn("&#x27;", markup)
         self.assertIn("\\&quot;x\\&quot;", markup)
         self.assertIn("Results from TMDB", markup)
+
+    def test_settings_form_masks_tmdb_token(self) -> None:
+        """The rendered settings HTML must never contain the actual token
+        value — only a masked placeholder — so it isn't leaked via view-
+        source or DevTools once the user has configured it."""
+        secret = "eyJverySECRETtoken12345"
+        from config import Config
+
+        cfg = Config()
+        cfg.metadata.tmdb_api_token = secret
+        cfg.metadata.tmdb_language = "en-US"
+
+        markup = webui._render_page(cfg)
+
+        self.assertNotIn(secret, markup)
+        self.assertIn("name='tmdb_api_token'", markup)
+        # Configured state should show the mask; unconfigured shows a hint.
+        self.assertIn("configured", markup)
 
 
 if __name__ == "__main__":

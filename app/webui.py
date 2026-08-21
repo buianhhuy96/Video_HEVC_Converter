@@ -299,6 +299,10 @@ def _render_page(cfg: Config) -> str:
     # Quality slider works in percent (higher = better) but submits CRF.
     # CRF range is 15 (near-lossless) to 30 (small); 100% = 15, 0% = 30.
     quality_pct = round((30 - e.global_quality) * 100 / 15)
+    tmdb_token_placeholder = (
+        "\u2022\u2022\u2022\u2022 configured" if cfg.metadata.tmdb_api_token
+        else "eyJhbGciOi\u2026 (paste v4 read token)"
+    )
 
     return f"""<!DOCTYPE html>
 <html lang='en'>
@@ -586,6 +590,33 @@ def _render_page(cfg: Config) -> str:
               <b>{r.sweep_at_time or 'never (manual only)'}</b>. Use <b>Scan now</b> or
               <b>Convert queued files</b> for one-shot manual runs.
             </p>
+            <div class='pt-3 border-t border-slate-700 space-y-2'>
+              <div class='text-sm font-semibold text-slate-200'>Rename metadata</div>
+              <p class='text-[11px] text-slate-500'>
+                Enables live movie/show title matching in the Rename tab via
+                <a href='https://www.themoviedb.org/settings/api' target='_blank'
+                   rel='noopener' class='text-cyan-400 underline'>TMDB</a>.
+                The token is stored in <code>config.yaml</code> and never sent to
+                the browser. Leave the field blank to keep the current token.
+              </p>
+              <div>
+                <label class='block text-xs text-slate-400 mb-1'>
+                  TMDB API Read Access Token
+                </label>
+                <input type='password' name='tmdb_api_token' value=''
+                       placeholder='{tmdb_token_placeholder}'
+                       autocomplete='off' spellcheck='false'
+                       class='w-full font-mono text-xs bg-slate-900 text-cyan-300 border border-slate-700 rounded px-2 py-1'>
+              </div>
+              <div>
+                <label class='block text-xs text-slate-400 mb-1'>Language</label>
+                <input type='text' name='tmdb_language'
+                       value='{_esc(cfg.metadata.tmdb_language)}'
+                       pattern='^[a-z]{{2}}(-[A-Z]{{2}})?$|^$'
+                       placeholder='en-US'
+                       class='w-32 font-mono text-xs bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1'>
+              </div>
+            </div>
             <div class='pt-2'>
               <button class='btn btn-primary'>Save settings</button>
               <span id='vhc-settings-status' class='text-xs ml-2 text-slate-400'>
@@ -1818,8 +1849,13 @@ def api_rename_matches(
     ):
         return ""
     media_type, year = metadata_search_context(node)
+    cfg = _load()
     try:
-        matches = search_media(query, media_type=media_type, year=year)
+        matches = search_media(
+            query, media_type=media_type, year=year,
+            token=cfg.metadata.tmdb_api_token,
+            language=cfg.metadata.tmdb_language,
+        )
     except LookupUnavailable as error:
         return _render_match_options(node_id, [], str(error))
     except LookupFailed as error:
@@ -2442,6 +2478,8 @@ def api_settings(
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
+    tmdb_api_token: Annotated[str, Form()] = "",
+    tmdb_language: Annotated[str, Form()] = "",
 ) -> HTMLResponse | RedirectResponse:
     if not 15 <= global_quality <= 30:
         raise HTTPException(400, "global_quality must be 15-30")
@@ -2475,7 +2513,15 @@ def api_settings(
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
-    save_config(cfg, _config_path, keys={"encoder", "output", "runtime"})
+    if tmdb_api_token.strip():
+        cfg.metadata.tmdb_api_token = tmdb_api_token.strip()
+    tmdb_language = tmdb_language.strip()
+    if tmdb_language:
+        import re as _re
+        if not _re.fullmatch(r"[a-z]{2}(-[A-Z]{2})?", tmdb_language):
+            raise HTTPException(400, "tmdb_language must be e.g. 'en' or 'en-US'")
+        cfg.metadata.tmdb_language = tmdb_language
+    save_config(cfg, _config_path, keys={"encoder", "output", "runtime", "metadata"})
 
     if request.headers.get("HX-Request"):
         return HTMLResponse(

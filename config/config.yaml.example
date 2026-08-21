@@ -146,6 +146,17 @@ validation:
   check_stream_counts: true
 
 # ---------------------------------------------------------------------------
+# Metadata provider (Rename tab title/year suggestions)
+# ---------------------------------------------------------------------------
+# Best set via the Setup tab in the web UI — the token is masked there and
+# never sent to the browser after saving. This file can also be edited by
+# hand. Empty string here falls back to the TMDB_API_TOKEN env var (see
+# docker-compose.yml / .env).
+metadata:
+  tmdb_api_token: ""
+  tmdb_language: "en-US"
+
+# ---------------------------------------------------------------------------
 # Runtime behaviour
 # ---------------------------------------------------------------------------
 runtime:
