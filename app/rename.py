@@ -229,7 +229,27 @@ def _sxxexx_label(parsed: ParsedMedia) -> str:
 
 _SXXEXX_STRICT = re.compile(r"^S(\d{1,3})E(\d{1,3})(?:-E(\d{1,3}))?$", re.IGNORECASE)
 _YEAR_STRICT = re.compile(r"^(19\d{2}|20\d{2})$")
-_SEASON_FOLDER = re.compile(r"^(?:season|s)\s*0*\d+$", re.IGNORECASE)
+# Tolerant season-folder detector: matches S01, SS1, ss 5, Season 3,
+# Season.01, SEASON_10, etc. Excludes bare digits (ambiguous) and
+# 'Specials' (which is already Jellyfin-canonical for extras).
+_SEASON_TOKEN = re.compile(r"^(?:S+|Season)\s*[._-]?\s*(\d{1,3})$", re.IGNORECASE)
+_SPECIALS_FOLDER = re.compile(r"^specials?$", re.IGNORECASE)
+
+
+def _season_number(name: str) -> int | None:
+    m = _SEASON_TOKEN.match(name.strip())
+    return int(m.group(1)) if m else None
+
+
+def _canonical_season(name: str) -> str | None:
+    """Return Jellyfin-canonical 'Season NN' if `name` looks like a numeric
+    season folder; None otherwise. 'Specials' folders are left untouched."""
+    n = _season_number(name)
+    return f"Season {n:02d}" if n is not None else None
+
+
+def _is_season_or_specials(name: str) -> bool:
+    return _season_number(name) is not None or bool(_SPECIALS_FOLDER.match(name.strip()))
 
 # Tolerant patterns for user-typed episode markers. Accept extra S's,
 # alternative separators, and the NxNN shorthand.
@@ -283,7 +303,7 @@ def _parts_from_parsed(path: Path, parsed: ParsedMedia) -> dict:
         }
     if parsed.kind == "tv" and parsed.season and parsed.episode:
         show = parsed.title or path.parent.name
-        if not parsed.title and _SEASON_FOLDER.match(show):
+        if not parsed.title and _is_season_or_specials(show):
             show = path.parent.parent.name
         if parsed.year:
             show = f"{show} ({parsed.year})"
@@ -466,7 +486,8 @@ def _new_file_node(current_path: Path) -> dict:
 
 
 def _new_folder_node(current_path: Path) -> dict:
-    proposed = _clean_title(current_path.name) or current_path.name
+    cleaned = _clean_title(current_path.name) or current_path.name
+    proposed = _canonical_season(cleaned) or cleaned
     return {
         "id": _node_id(str(current_path)),
         "type": "folder",
@@ -920,10 +941,12 @@ def apply_tree(tree: dict, log_path: Path) -> dict:
 # --------------------------------------------------------------------------
 
 def _append_log(log_path: Path, moves: list[dict]) -> None:
+    """Persist ONLY the most recent Apply batch — older history is
+    discarded so Undo always reverses the last Apply and nothing older.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {"ts": time.time(), "moves": moves}
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    _replace_log(log_path, [entry])
 
 
 def _replace_log(log_path: Path, batches: list[dict]) -> None:

@@ -381,10 +381,43 @@ class FolderNameCleaningTests(unittest.TestCase):
         self.assertEqual(node["name"], "Better.Call.Saul")
         self.assertEqual(node["proposed"], "Better Call Saul")
 
-    def test_folder_proposed_leaves_clean_names_alone(self) -> None:
-        for name in ("Movies", "TVShows", "Season 01", "SS1"):
+    def test_folder_proposed_leaves_non_season_names_alone(self) -> None:
+        for name in ("Movies", "TVShows", "Specials"):
             node = _new_folder_node(Path(f"/media/{name}"))
             self.assertEqual(node["proposed"], name)
+
+    def test_season_folder_variants_canonicalize_to_jellyfin_format(self) -> None:
+        cases = {
+            "S01": "Season 01",
+            "S1": "Season 01",
+            "s5": "Season 05",
+            "SS1": "Season 01",
+            "SS 5": "Season 05",
+            "ss05": "Season 05",
+            "Season 1": "Season 01",
+            "Season 01": "Season 01",
+            "Season.3": "Season 03",
+            "Season_10": "Season 10",
+            "SEASON05": "Season 05",
+            "S00": "Season 00",
+        }
+        for input_name, expected in cases.items():
+            with self.subTest(input=input_name):
+                node = _new_folder_node(Path(f"/media/Show/{input_name}"))
+                self.assertEqual(node["proposed"], expected)
+
+    def test_ambiguous_bare_number_folders_are_not_canonicalized(self) -> None:
+        # A folder literally named "1" or "01" is too ambiguous to guess.
+        for name in ("1", "01", "2024"):
+            node = _new_folder_node(Path(f"/media/Show/{name}"))
+            self.assertEqual(node["proposed"], name)
+
+    def test_bare_episode_under_season_variant_folder_uses_grandparent(self) -> None:
+        # File parser walk-up now recognises SS1/, ss5/, Season.03/ etc.
+        # as season folders and looks one level up for the show name.
+        node = _new_file_node(Path("/media/TVShows/Better Call Saul/SS1/S01E05.mkv"))
+        self.assertEqual(node["parts"]["title"], "Better Call Saul")
+        self.assertEqual(node["parts"]["middle"], "S01E05")
 
 
 class ApplyIsIdempotentTests(unittest.TestCase):
@@ -430,6 +463,61 @@ class ApplyIsIdempotentTests(unittest.TestCase):
             with open(log, "r", encoding="utf-8") as f:
                 batches = [line for line in f if line.strip()]
             self.assertEqual(len(batches), 1)
+
+
+class UndoOnlyReversesLastApplyTests(unittest.TestCase):
+    """Users can rename the same file across multiple Apply passes; only
+    the MOST RECENT rename should be in the undo log. Older Apply history
+    is discarded."""
+
+    def tearDown(self) -> None:
+        state.set_pending([])
+        state.set_all_media([])
+
+    def test_undo_after_two_applies_reverses_only_the_last(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "Original.mkv"
+            src.write_bytes(b"payload")
+            log = Path(tmp) / "undo.log"
+            state.set_pending([{"path": str(src)}])
+
+            def _tree(current_path: Path, proposed_name: str) -> dict:
+                return {
+                    "id": "root", "type": "folder", "name": tmp,
+                    "proposed": tmp, "path": tmp, "is_root": True,
+                    "children": [{
+                        "id": "f1", "type": "file",
+                        "name": current_path.name, "ext": ".mkv",
+                        "kind": "movie", "path": str(current_path),
+                        "proposed": proposed_name,
+                        "parts": {"title": current_path.stem,
+                                  "middle": "", "right": ""},
+                    }],
+                }
+
+            # Apply 1: Original → Intermediate
+            apply_tree(_tree(src, "Intermediate.mkv"), log)
+            mid = Path(tmp) / "Intermediate.mkv"
+            self.assertTrue(mid.exists())
+            self.assertFalse(src.exists())
+
+            # Apply 2: Intermediate → Final
+            apply_tree(_tree(mid, "Final.mkv"), log)
+            final = Path(tmp) / "Final.mkv"
+            self.assertTrue(final.exists())
+            self.assertFalse(mid.exists())
+
+            # Log holds exactly ONE batch — the most recent Apply.
+            with open(log, "r", encoding="utf-8") as f:
+                batches = [line for line in f if line.strip()]
+            self.assertEqual(len(batches), 1)
+
+            # Undo reverses only the second Apply. The file returns to
+            # Intermediate (not Original), and pending follows.
+            undo_last(log)
+            self.assertTrue(mid.exists())
+            self.assertFalse(final.exists())
+            self.assertEqual(state.get_pending()[0]["path"], str(mid))
 
 
 if __name__ == "__main__":
