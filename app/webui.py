@@ -903,7 +903,15 @@ def _render_pending_table(
     if len(items) > 100:
         footer = (f"<div class='text-xs text-slate-400 mt-2'>"
                   f"+ {len(items) - 100} more not shown\u2026</div>")
-    return f"{header}<table class='w-full text-sm'>{thead}<tbody>{''.join(rows)}</tbody></table>{footer}"
+    # The count/summary stays fixed above; the table body scrolls inside
+    # a bounded box so a big pending list doesn't push the rest of the
+    # tab off-screen.
+    return (
+        f"{header}"
+        f"<div class='max-h-[60vh] overflow-y-auto'>"
+        f"<table class='w-full text-sm'>{thead}<tbody>{''.join(rows)}</tbody></table>"
+        f"</div>{footer}"
+    )
 
 
 def _render_scan_progress() -> str:
@@ -2541,12 +2549,12 @@ def _render_rename(cfg: Config, banner: str = "") -> str:
 })();
 </script>
 """
-    # Wrap the whole tree in a horizontal-scroll container so long paths
-    # never wrap or truncate under the parent card width.
+    # Bounded scroll box: horizontal for wide paths, vertical so a big
+    # tree scrolls inside the card instead of pushing the whole page.
     return (
         header
         + style_and_script
-        + "<div class='overflow-x-auto'>"
+        + "<div class='max-h-[70vh] overflow-auto'>"
         + "<div id='vhc-rename-tree' class='min-w-max'>"
         + columns_header
         + _render_tree_node(tree, 0)

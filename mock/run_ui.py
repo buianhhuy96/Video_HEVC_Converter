@@ -207,6 +207,18 @@ def _sample_pending() -> list[dict]:
         {"path": "/media/TVShows/Series-A/S01E06.mkv",     "codec": "h264",  "width": 1920, "height": 1080, "duration": 2712,  "size": 3_200_000_000,  "bit_depth": 8},
         {"path": "/media/TVShows/Series-B/S02E13.mkv",     "codec": "mpeg4", "width": 1280, "height": 720,  "duration": 2690,  "size": 1_800_000_000,  "bit_depth": 8},
         {"path": "/media/Movies/Wicked (2024).mkv",        "codec": "h264",  "width": 3840, "height": 2160, "duration": 9560,  "size": 23_400_000_000, "bit_depth": 10},
+        # Extra rows so the Pending/Up-next scroll boxes actually overflow
+        # in the mock demo. Real libraries usually have hundreds.
+        {"path": "/media/Movies/The Fall Guy (2024).mkv",           "codec": "h264",  "width": 3840, "height": 2160, "duration": 7860,  "size": 17_200_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/Kingdom of the Planet of the Apes (2024).mkv", "codec": "h264",  "width": 3840, "height": 2160, "duration": 8520,  "size": 19_800_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/Twisters (2024).mkv",              "codec": "h264",  "width": 1920, "height": 1080, "duration": 7080,  "size": 8_400_000_000,  "bit_depth": 8},
+        {"path": "/media/Movies/Deadpool and Wolverine (2024).mkv","codec": "h264",  "width": 3840, "height": 2160, "duration": 7620,  "size": 18_600_000_000, "bit_depth": 10},
+        {"path": "/media/Movies/A Quiet Place Day One (2024).mkv", "codec": "h264",  "width": 3840, "height": 2160, "duration": 5820,  "size": 12_400_000_000, "bit_depth": 10},
+        {"path": "/media/TVShows/Series-A/S01E07.mkv",             "codec": "h264",  "width": 1920, "height": 1080, "duration": 2645,  "size": 3_150_000_000,  "bit_depth": 8},
+        {"path": "/media/TVShows/Series-A/S01E08.mkv",             "codec": "h264",  "width": 1920, "height": 1080, "duration": 2698,  "size": 3_180_000_000,  "bit_depth": 8},
+        {"path": "/media/TVShows/Series-B/S02E14.mkv",             "codec": "mpeg4", "width": 1280, "height": 720,  "duration": 2710,  "size": 1_820_000_000,  "bit_depth": 8},
+        {"path": "/media/TVShows/Series-B/S02E15.mkv",             "codec": "mpeg4", "width": 1280, "height": 720,  "duration": 2680,  "size": 1_790_000_000,  "bit_depth": 8},
+        {"path": "/media/Movies/Godzilla x Kong The New Empire (2024).mkv", "codec": "h264", "width": 3840, "height": 2160, "duration": 6720, "size": 15_800_000_000, "bit_depth": 10},
     ]
 
 
