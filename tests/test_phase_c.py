@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,12 +12,15 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 import media_lookup  # noqa: E402
+import state  # noqa: E402
 import webui  # noqa: E402
 from rename import (  # noqa: E402
     _new_file_node,
     apply_metadata_match,
+    apply_tree,
     compute_ops,
     metadata_search_context,
+    undo_last,
 )
 
 
@@ -276,6 +280,95 @@ class RenameMetadataTests(unittest.TestCase):
         self.assertIn("name='tmdb_api_token'", markup)
         # Configured state should show the mask; unconfigured shows a hint.
         self.assertIn("configured", markup)
+
+
+class PendingRemapAfterRenameTests(unittest.TestCase):
+    """A user who renames files via the Rename tab before clicking Convert
+    would otherwise see the queue silently drop everything (paths don't
+    exist anymore). apply_tree / undo_last must update pending in place.
+    """
+
+    def tearDown(self) -> None:
+        state.set_pending([])
+        state.set_all_media([])
+
+    def test_apply_remaps_pending_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "Movie.2020.mkv"
+            src.write_bytes(b"x")
+            state.set_pending([{"path": str(src), "codec": "h264"}])
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "f1", "type": "file", "name": "Movie.2020.mkv",
+                    "ext": ".mkv", "kind": "movie",
+                    "path": str(src), "proposed": "Movie (2020).mkv",
+                    "parts": {"title": "Movie", "middle": "2020", "right": ""},
+                }],
+            }
+            apply_tree(tree, Path(tmp) / "undo.log")
+
+            expected = str(Path(tmp) / "Movie (2020).mkv")
+            self.assertEqual(state.get_pending()[0]["path"], expected)
+            self.assertTrue(Path(expected).exists())
+
+    def test_apply_remaps_pending_under_folder_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Better.Call.Saul"
+            folder.mkdir()
+            src = folder / "S01E01.mkv"
+            src.write_bytes(b"x")
+            state.set_pending([{"path": str(src), "codec": "h264"}])
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "d1", "type": "folder",
+                    "name": "Better.Call.Saul",
+                    "proposed": "Better Call Saul (2015)",
+                    "path": str(folder),
+                    "children": [{
+                        "id": "f1", "type": "file",
+                        "name": "S01E01.mkv", "ext": ".mkv", "kind": "tv",
+                        "path": str(src),
+                        "proposed": "S01E01.mkv",
+                        "parts": {"title": "Better Call Saul (2015)",
+                                  "middle": "S01E01", "right": ""},
+                    }],
+                }],
+            }
+            apply_tree(tree, Path(tmp) / "undo.log")
+
+            expected = str(Path(tmp) / "Better Call Saul (2015)" / "S01E01.mkv")
+            self.assertEqual(state.get_pending()[0]["path"], expected)
+            self.assertTrue(Path(expected).exists())
+
+    def test_undo_restores_pending_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "Movie.2020.mkv"
+            src.write_bytes(b"x")
+            state.set_pending([{"path": str(src), "codec": "h264"}])
+            log = Path(tmp) / "undo.log"
+
+            tree = {
+                "id": "root", "type": "folder", "name": tmp, "proposed": tmp,
+                "path": tmp, "is_root": True,
+                "children": [{
+                    "id": "f1", "type": "file", "name": "Movie.2020.mkv",
+                    "ext": ".mkv", "kind": "movie",
+                    "path": str(src), "proposed": "Movie (2020).mkv",
+                    "parts": {"title": "Movie", "middle": "2020", "right": ""},
+                }],
+            }
+            apply_tree(tree, log)
+            self.assertNotEqual(state.get_pending()[0]["path"], str(src))
+
+            undo_last(log)
+            self.assertEqual(state.get_pending()[0]["path"], str(src))
+            self.assertTrue(src.exists())
 
 
 if __name__ == "__main__":

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+import state
+
 log = logging.getLogger(__name__)
 
 
@@ -802,6 +804,10 @@ def compute_ops(tree: dict) -> list[dict]:
     mkdir_ops = [{"src": None, "dst": d, "type": "folder", "kind": "mkdir"}
                  for d in mkdirs]
     _rewrite_after_folder_renames(file_ops, folder_renames)
+    # A file whose only "rename" was its parent folder becomes a no-op
+    # after the folder-rename rewrite; drop it so we don't try to rename
+    # a file onto itself and fail with "destination already exists".
+    file_ops = [op for op in file_ops if op["src"] != op["dst"]]
 
     # Order: folder renames (their src still uses ORIGINAL parent names,
     # execute top-down); then mkdirs (shortest path first so nested new
@@ -888,6 +894,12 @@ def apply_tree(tree: dict, log_path: Path) -> dict:
 
     if performed:
         _append_log(log_path, performed)
+        # Keep in-memory pending/all_media paths in sync with disk so a
+        # Convert click right after Apply still finds the queued files.
+        folder_map = [(m["src"], m["dst"]) for m in performed if m.get("kind") == "folder"]
+        file_map = [(m["src"], m["dst"]) for m in performed
+                    if m.get("kind") in ("file", "subtitle") and m.get("src")]
+        state.remap_paths(folder_map, file_map)
     return {"applied": ok_count, "failed": fail_count, "results": results}
 
 
@@ -932,6 +944,7 @@ def undo_last(log_path: Path) -> dict:
     reverted = 0
     failures: list[dict] = []
     pending_moves: list[dict] = []
+    undone: list[dict] = []
 
     for index in range(len(moves) - 1, -1, -1):
         move = moves[index]
@@ -945,10 +958,19 @@ def undo_last(log_path: Path) -> dict:
             else:
                 _rename_one(Path(move["dst"]), Path(move["src"]))
                 reverted += 1
+                undone.append(move)
         except OSError as e:
             failures.append({"move": move, "error": str(e)})
             pending_moves = moves[:index + 1]
             break
+
+    if undone:
+        # Reverse-remap in-memory pending/all_media so a Convert click still
+        # finds the files at their (now restored) original paths.
+        folder_map = [(m["dst"], m["src"]) for m in undone if m.get("kind") == "folder"]
+        file_map = [(m["dst"], m["src"]) for m in undone
+                    if m.get("kind") in ("file", "subtitle")]
+        state.remap_paths(folder_map, file_map, folders_first=False)
 
     if pending_moves:
         batches[-1] = {**last, "moves": pending_moves}

@@ -9,6 +9,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from os.path import sep as _sep
 from typing import Any
 
 # Actions the UI can request. The main loop consumes these instead of just
@@ -210,6 +211,46 @@ def clear_pending() -> None:
 def remove_pending(path: str) -> None:
     with _pending_lock:
         _pending[:] = [x for x in _pending if x.get("path") != path]
+
+
+def remap_paths(folder_map: list[tuple[str, str]],
+                file_map: list[tuple[str, str]],
+                *, folders_first: bool = True) -> None:
+    """Rewrite in-memory pending/all_media paths after on-disk renames.
+
+    Folder renames apply as a path prefix; file renames as an exact match.
+    Must be called with the same src/dst mappings that were just committed
+    to disk. For an Apply pass (folder → new-folder → file), use
+    folders_first=True; for Undo, pass reversed mappings and False.
+    """
+    folders = sorted(folder_map, key=lambda pair: -len(pair[0]))
+
+    def _apply_folder(path: str) -> str:
+        for src, dst in folders:
+            prefix = src.rstrip(_sep) + _sep
+            if path.startswith(prefix):
+                return dst.rstrip(_sep) + _sep + path[len(prefix):]
+            if path == src:
+                return dst
+        return path
+
+    def _apply_file(path: str) -> str:
+        for src, dst in file_map:
+            if path == src:
+                return dst
+        return path
+
+    def _remap(path: str) -> str:
+        if folders_first:
+            return _apply_file(_apply_folder(path))
+        return _apply_folder(_apply_file(path))
+
+    with _pending_lock:
+        for entry in _pending:
+            entry["path"] = _remap(entry.get("path", ""))
+    with _all_media_lock:
+        for entry in _all_media:
+            entry["path"] = _remap(entry.get("path", ""))
 
 
 # ---------------------------------------------------------------------------
