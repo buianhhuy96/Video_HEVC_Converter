@@ -73,6 +73,27 @@ is deleted, the original is untouched, and the failure is recorded in
    docker compose logs -f
    ```
 
+### Movie and show title matching
+
+The Rename tab can search TMDB for canonical movie/show titles and years while
+you type in a Title field. The lookup runs through the converter server, so the
+TMDB token is never exposed to the browser. Episode names are not fetched or
+changed.
+
+For Docker, create a local `.env` beside `docker-compose.yml` (it is ignored by
+Git):
+
+```dotenv
+TMDB_API_TOKEN=your_tmdb_api_read_access_token
+TMDB_LANGUAGE=en-US
+```
+
+Then recreate the service with `docker compose up -d --build`. For the Windows
+launcher, set `TMDB_API_TOKEN` in the shell before running `run.ps1`. For a
+systemd package, add the variable with `systemctl edit video-hevc-converter`
+and restart the service. Manual renaming continues to work when no token is
+configured or TMDB is unavailable.
+
 ### Editing container settings from the UI
 
 The web UI's **Container** card (Setup tab) shows the current timezone, port,

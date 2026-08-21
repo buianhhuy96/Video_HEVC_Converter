@@ -222,6 +222,7 @@ def _sxxexx_label(parsed: ParsedMedia) -> str:
 
 _SXXEXX_STRICT = re.compile(r"^S(\d{1,3})E(\d{1,3})(?:-E(\d{1,3}))?$", re.IGNORECASE)
 _YEAR_STRICT = re.compile(r"^(19\d{2}|20\d{2})$")
+_SEASON_FOLDER = re.compile(r"^(?:season|s)\s*0*\d+$", re.IGNORECASE)
 
 # Tolerant patterns for user-typed episode markers. Accept extra S's,
 # alternative separators, and the NxNN shorthand.
@@ -273,8 +274,10 @@ def _parts_from_parsed(path: Path, parsed: ParsedMedia) -> dict:
             "middle": str(parsed.year) if parsed.year else "",
             "right": "",
         }
-    if parsed.kind == "tv" and parsed.title:
-        show = parsed.title
+    if parsed.kind == "tv" and parsed.season and parsed.episode:
+        show = parsed.title or path.parent.name
+        if not parsed.title and _SEASON_FOLDER.match(show):
+            show = path.parent.parent.name
         if parsed.year:
             show = f"{show} ({parsed.year})"
         return {
@@ -315,6 +318,91 @@ def rebuild_proposed(parts: dict, ext: str, fallback: str) -> str:
     return f"{base}{ext}"
 
 
+def _folder_media_types(node: dict) -> set[Literal["movie", "tv"]]:
+    media_types: set[Literal["movie", "tv"]] = set()
+    for child in node.get("children") or []:
+        if child.get("type") == "folder":
+            media_types.update(_folder_media_types(child))
+            continue
+        child_type, _ = metadata_search_context(child)
+        if child_type in ("movie", "tv"):
+            media_types.add(child_type)
+    return media_types
+
+
+def metadata_search_context(node: dict) -> tuple[Literal["movie", "tv", "any"], int | None]:
+    """Infer a metadata search type and year from a file or folder node."""
+    if node.get("type") == "folder":
+        proposed = str(node.get("proposed") or node.get("name") or "")
+        year_match = re.search(r"\((19\d{2}|20\d{2})\)\s*$", proposed)
+        year = int(year_match.group(1)) if year_match else None
+        media_types = _folder_media_types(node)
+        if len(media_types) == 1:
+            return next(iter(media_types)), year
+        kind = node.get("kind")
+        return (kind if kind in ("movie", "tv") else "any"), year
+
+    parts = node.get("parts") or {}
+    middle = str(parts.get("middle") or "").strip()
+    if _YEAR_STRICT.match(middle):
+        return "movie", int(middle)
+    if middle and _SXXEXX_STRICT.match(_normalize_tv_marker(middle)):
+        title = str(parts.get("title") or "")
+        year_match = re.search(r"\((19\d{2}|20\d{2})\)\s*$", title)
+        return "tv", int(year_match.group(1)) if year_match else None
+    kind = node.get("kind")
+    if kind in ("movie", "tv"):
+        return kind, None
+    return "any", None
+
+
+def apply_metadata_match(node: dict, provider: str, provider_id: str,
+                         media_type: Literal["movie", "tv"],
+                         title: str, year: int | None) -> None:
+    """Apply only a selected canonical title/year to a file or folder node."""
+    if node.get("type") not in ("file", "folder") or media_type not in ("movie", "tv"):
+        return
+    title = title.strip()
+    if not title:
+        return
+
+    if node["type"] == "folder":
+        proposed = _sanitize(title)
+        if year:
+            proposed += f" ({year})"
+        node["proposed"] = proposed
+        node["kind"] = media_type
+        node["metadata_match"] = {
+            "provider": provider,
+            "id": provider_id,
+            "media_type": media_type,
+        }
+        return
+
+    parts = dict(node.get("parts") or {})
+    middle = str(parts.get("middle") or "").strip()
+    if media_type == "movie":
+        parts["title"] = title
+        parts["middle"] = str(year) if year else ""
+    else:
+        parts["title"] = f"{title} ({year})" if year else title
+        if _YEAR_STRICT.match(middle):
+            parts["middle"] = ""
+
+    node["parts"] = parts
+    node["proposed"] = rebuild_proposed(
+        parts, node.get("ext", ""), node["name"],
+    )
+    node["kind"] = media_type
+    node["confidence"] = "high"
+    node["note"] = None
+    node["metadata_match"] = {
+        "provider": provider,
+        "id": provider_id,
+        "media_type": media_type,
+    }
+
+
 # --------------------------------------------------------------------------
 # Tree construction
 # --------------------------------------------------------------------------
@@ -346,17 +434,27 @@ def _new_file_node(current_path: Path) -> dict:
     parsed = parse_filename(current_path)
     ext = current_path.suffix
     parts = _parts_from_parsed(current_path, parsed)
+    inferred_tv_show = (
+        parsed.kind == "tv"
+        and parsed.season is not None
+        and parsed.episode is not None
+        and not parsed.title
+    )
     return {
         "id": _node_id(str(current_path)),
         "type": "file",
         "name": current_path.name,
         "proposed": rebuild_proposed(parts, ext, current_path.name),
         "path": str(current_path),
-        "confidence": parsed.confidence if parsed.title else "low",
+        "confidence": "medium" if inferred_tv_show else (
+            parsed.confidence if parsed.title else "low"
+        ),
         "kind": parsed.kind,
         "ext": ext,
         "parts": parts,
-        "note": None if parsed.title else "could not parse filename",
+        "note": "show inferred from parent folder" if inferred_tv_show else (
+            None if parsed.title else "could not parse filename"
+        ),
     }
 
 

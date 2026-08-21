@@ -19,6 +19,10 @@ services:
       # or set it to require HTTP Basic auth on every request.
       UI_PORT: "8080"
       # UI_PASSWORD: "change-me"
+      # Optional Phase C title/year matching. Docker Compose reads these
+      # values from a local .env file; the token is never sent to the browser.
+      TMDB_API_TOKEN: "${TMDB_API_TOKEN:-}"
+      TMDB_LANGUAGE: "${TMDB_LANGUAGE:-en-US}"
     ports:
       - "8080:8080"
     volumes:

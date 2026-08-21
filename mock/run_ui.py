@@ -93,6 +93,7 @@ runtime:
 """, encoding="utf-8")
 
 os.environ["CONFIG_PATH"] = str(CONFIG_PATH)
+os.environ["VHC_METADATA_PROVIDER"] = "mock"
 
 import state          # noqa: E402
 import webui          # noqa: E402

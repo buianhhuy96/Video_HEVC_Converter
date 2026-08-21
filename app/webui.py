@@ -6,6 +6,7 @@ UI_PASSWORD is set; otherwise open (intended for LAN-only exposure).
 from __future__ import annotations
 
 import html
+import json
 import logging
 import math
 import os
@@ -1646,6 +1647,55 @@ def _rename_log_path(cfg: Config) -> Path:
     return Path(cfg.runtime.state_db).with_name("renames.log")
 
 
+def _render_match_options(node_id: str, matches: list,
+                          message: str = "") -> str:
+    """Render accessible title/year options for one rename Title field."""
+    if message:
+        return (
+            f"<div class='px-3 py-2 text-xs text-amber-200' role='status'>"
+            f"{_esc(message)}</div>"
+        )
+    if not matches:
+        return (
+            "<div class='px-3 py-2 text-xs text-slate-400' role='status'>"
+            "No matching movie or show titles.</div>"
+        )
+
+    safe_node_id = _esc(node_id)
+    options: list[str] = []
+    for index, match in enumerate(matches):
+        values = _esc(json.dumps({
+            "node_id": node_id,
+            "provider": match.provider,
+            "provider_id": match.provider_id,
+            "media_type": match.media_type,
+            "title": match.title,
+            "year": str(match.year or ""),
+        }))
+        label = "Movie" if match.media_type == "movie" else "Show"
+        year = str(match.year) if match.year else "Year unknown"
+        options.append(
+            f"<button type='button' role='option' aria-selected='false' "
+            f"id='rename-match-{safe_node_id}-{index}' "
+            f"class='vhc-match-option w-full grid grid-cols-[52px_1fr_auto] "
+            f"items-center gap-2 px-2 py-1.5 text-left' "
+            f"hx-post='/api/rename/select-match' hx-vals='{values}' "
+            f"hx-target='#rename-editor-{safe_node_id}' hx-swap='outerHTML'>"
+            f"<span class='text-[10px] uppercase text-cyan-300'>{label}</span>"
+            f"<span class='truncate text-xs text-slate-100'>{_esc(match.title)}</span>"
+            f"<span class='text-[11px] text-slate-400'>{_esc(year)}</span>"
+            f"</button>"
+        )
+    provider = matches[0].provider
+    source = "TMDB" if provider == "tmdb" else "Mock metadata"
+    return (
+        f"<div class='sr-only' role='status'>{len(matches)} title matches.</div>"
+        + "".join(options)
+        + "<div class='px-2 py-1 border-t border-slate-700 "
+                    f"text-[10px] text-slate-500 text-right'>Results from {_esc(source)}</div>"
+    )
+
+
 @app.get("/api/rename/preview", response_class=HTMLResponse)
 def api_rename_preview(_: Auth) -> str:
     return _render_rename(_load())
@@ -1729,10 +1779,91 @@ def api_rename_edit(
         new_proposed = rebuild_proposed(
             parts, node.get("ext", ""), node["name"],
         )
+        match = node.get("metadata_match") or {}
+        if field == "title" or (
+            field == "middle" and match.get("media_type") == "movie"
+        ):
+            node.pop("metadata_match", None)
         state.update_rename_node(node_id, parts=parts, proposed=new_proposed)
     elif proposed is not None:
-        state.update_rename_node(node_id, proposed=proposed)
+        from rename import find_node
+        tree = state.get_rename_tree()
+        node = find_node(tree, node_id) if tree else None
+        if node is not None:
+            node["proposed"] = proposed
+            node.pop("metadata_match", None)
+            state.set_rename_tree(tree)
     return ""  # HTMX hx-swap='none' consumer
+
+
+@app.get("/api/rename/matches", response_class=HTMLResponse)
+def api_rename_matches(
+    _: Auth,
+    node_id: str,
+    value: str = "",
+    proposed: str = "",
+) -> str:
+    """Return server-backed movie/show title matches for a file or folder."""
+    from media_lookup import LookupFailed, LookupUnavailable, search_media
+    from rename import find_node, metadata_search_context
+
+    tree = state.get_rename_tree()
+    node = find_node(tree, node_id) if tree else None
+    query = value or proposed
+    if (
+        node is None
+        or node.get("type") not in ("file", "folder")
+        or node.get("is_root") is True
+        or len(query.strip()) < 2
+    ):
+        return ""
+    media_type, year = metadata_search_context(node)
+    try:
+        matches = search_media(query, media_type=media_type, year=year)
+    except LookupUnavailable as error:
+        return _render_match_options(node_id, [], str(error))
+    except LookupFailed as error:
+        log.warning("metadata lookup failed: %s", error)
+        return _render_match_options(node_id, [], str(error))
+    return _render_match_options(node_id, matches)
+
+
+@app.post("/api/rename/select-match", response_class=HTMLResponse)
+def api_rename_select_match(
+    _: Auth,
+    node_id: Annotated[str, Form()],
+    provider: Annotated[str, Form()],
+    provider_id: Annotated[str, Form()],
+    media_type: Annotated[str, Form()],
+    title: Annotated[str, Form()],
+    year: Annotated[str, Form()] = "",
+) -> str:
+    """Apply a selected canonical title/year and return the updated editor."""
+    from rename import apply_metadata_match, find_node
+
+    if (
+        provider not in ("tmdb", "mock")
+        or media_type not in ("movie", "tv")
+        or not re.fullmatch(r"[A-Za-z0-9:_-]{1,80}", provider_id)
+        or not title.strip()
+        or len(title) > 200
+    ):
+        raise HTTPException(status_code=400, detail="invalid metadata match")
+    parsed_year = int(year) if re.fullmatch(r"(?:19|20)\d{2}", year) else None
+
+    tree = state.get_rename_tree()
+    node = find_node(tree, node_id) if tree else None
+    if (
+        node is None
+        or node.get("type") not in ("file", "folder")
+        or node.get("is_root") is True
+    ):
+        raise HTTPException(status_code=404, detail="rename node not found")
+    apply_metadata_match(
+        node, provider, provider_id, media_type, title, parsed_year,
+    )
+    state.set_rename_tree(tree)
+    return _proposed_input(node, False)
 
 
 @app.post("/api/rename/add_folder", response_class=HTMLResponse)
@@ -1806,6 +1937,7 @@ def _proposed_input(node: dict, is_root: bool) -> str:
     appended verbatim).
     """
     node_id = _esc(node["id"])
+    editor_id = f"rename-editor-{node_id}"
     readonly = "readonly" if is_root else ""
     input_cls = (
         "w-full font-mono text-xs bg-slate-900 "
@@ -1833,16 +1965,64 @@ def _proposed_input(node: dict, is_root: bool) -> str:
             f"name='value'>"
         )
 
-    if node["type"] == "folder" or is_root:
-        return one_full(node["proposed"])
+    if is_root:
+        return (
+            f"<div id='{editor_id}' class='vhc-proposed-editor'>"
+            f"{one_full(node['proposed'])}</div>"
+        )
+
+    if node["type"] == "folder":
+        input_id = f"rename-title-{node_id}"
+        matches_id = f"rename-matches-{node_id}"
+        return (
+            f"<div id='{editor_id}' class='vhc-proposed-editor'>"
+            f"<form hx-post='/api/rename/edit' hx-swap='none' "
+            f"hx-trigger='change delay:100ms'>"
+            f"<input type='hidden' name='node_id' value='{node_id}'>"
+            f"<input id='{input_id}' type='text' value='{_esc(node['proposed'])}' "
+            f"placeholder='Movie / Show folder' class='{input_cls} vhc-title-input' "
+            f"name='proposed' autocomplete='off' spellcheck='false' "
+            f"role='combobox' aria-autocomplete='list' aria-haspopup='listbox' "
+            f"aria-expanded='false' aria-controls='{matches_id}' "
+            f"hx-get='/api/rename/matches' hx-trigger='input changed delay:350ms' "
+            f"hx-vals='{{\"node_id\": \"{node_id}\"}}' "
+            f"hx-target='#{matches_id}' hx-swap='innerHTML' hx-sync='this:replace'>"
+            f"</form>"
+            f"<div id='{matches_id}' role='listbox' "
+            f"aria-label='Movie and show folder matches' data-input-id='{input_id}' "
+            f"class='vhc-match-list hidden mt-1'></div>"
+            f"</div>"
+        )
 
     parts = node.get("parts") or {}
+    input_id = f"rename-title-{node_id}"
+    matches_id = f"rename-matches-{node_id}"
+    title_input = (
+        "<div class='vhc-title-combobox min-w-0'>"
+        f"<form class='contents' hx-post='/api/rename/edit' hx-swap='none' "
+        f"hx-trigger='change delay:100ms'>"
+        f"<input type='hidden' name='node_id' value='{node_id}'>"
+        "<input type='hidden' name='field' value='title'>"
+        f"<input id='{input_id}' type='text' value='{_esc(parts.get('title', ''))}' "
+        f"placeholder='Title / Show name' class='{input_cls} vhc-title-input' "
+        "name='value' autocomplete='off' spellcheck='false' "
+        "role='combobox' aria-autocomplete='list' aria-haspopup='listbox' "
+        f"aria-expanded='false' aria-controls='{matches_id}' "
+        f"hx-get='/api/rename/matches' hx-trigger='input changed delay:350ms' "
+        f"hx-vals='{{\"node_id\": \"{node_id}\"}}' "
+        f"hx-target='#{matches_id}' hx-swap='innerHTML' hx-sync='this:replace'>"
+        "</form></div>"
+    )
     return (
+        f"<div id='{editor_id}' class='vhc-proposed-editor'>"
         "<div class='grid grid-cols-[1fr_110px_1fr] gap-1'>"
-        + one_part("title", parts.get("title", ""), "Title / Show name")
+        + title_input
         + one_part("middle", parts.get("middle", ""), "Year or S01E01")
         + one_part("right", parts.get("right", ""), "Version / Episode title")
-        + "</div>"
+        + f"<div id='{matches_id}' role='listbox' "
+          f"aria-label='Movie and show title matches' data-input-id='{input_id}' "
+          "class='vhc-match-list hidden col-span-3'></div>"
+        + "</div></div>"
     )
 
 
@@ -2079,6 +2259,18 @@ def _render_rename(cfg: Config, banner: str = "") -> str:
     color: rgb(56, 189, 248);
     border-color: rgb(56, 189, 248);
   }
+    #vhc-rename-tree .vhc-match-list {
+        max-height: 220px;
+        overflow-y: auto;
+        background: rgb(15, 23, 42);
+        border: 1px solid rgb(71, 85, 105);
+        border-radius: 4px;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+    }
+    #vhc-rename-tree .vhc-match-option:hover,
+    #vhc-rename-tree .vhc-match-option[data-active='true'] {
+        background: rgb(30, 64, 84);
+    }
 </style>
 <script>
 (function() {
@@ -2117,6 +2309,107 @@ def _render_rename(cfg: Config, banner: str = "") -> str:
       document.addEventListener('mouseup', onUp);
     });
   });
+
+    if (window.vhcRenameComboboxReady) return;
+    window.vhcRenameComboboxReady = true;
+
+    function matchList(input) {
+        return input && input.getAttribute('aria-controls')
+            ? document.getElementById(input.getAttribute('aria-controls'))
+            : null;
+    }
+
+    function closeMatches(input) {
+        var list = matchList(input);
+        if (!list) return;
+        list.replaceChildren();
+        list.classList.add('hidden');
+        list.dataset.activeIndex = '-1';
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-activedescendant');
+    }
+
+    function setActive(input, index) {
+        var list = matchList(input);
+        if (!list) return;
+        var options = Array.from(list.querySelectorAll('[role="option"]'));
+        if (!options.length) return;
+        index = Math.max(0, Math.min(index, options.length - 1));
+        options.forEach(function(option, optionIndex) {
+            var active = optionIndex === index;
+            option.dataset.active = active ? 'true' : 'false';
+            option.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        list.dataset.activeIndex = String(index);
+        input.setAttribute('aria-activedescendant', options[index].id);
+        options[index].scrollIntoView({block: 'nearest'});
+    }
+
+    document.addEventListener('input', function(event) {
+        var input = event.target.closest && event.target.closest('.vhc-title-input');
+        if (!input) return;
+        closeMatches(input);
+    });
+
+    document.addEventListener('keydown', function(event) {
+        var input = event.target.closest && event.target.closest('.vhc-title-input');
+        if (!input) return;
+        var list = matchList(input);
+        var options = list ? Array.from(list.querySelectorAll('[role="option"]')) : [];
+        var current = list ? parseInt(list.dataset.activeIndex || '-1', 10) : -1;
+        if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && options.length) {
+            event.preventDefault();
+            setActive(input, event.key === 'ArrowDown'
+                ? Math.min(current + 1, options.length - 1)
+                : (current < 0 ? options.length - 1 : Math.max(current - 1, 0)));
+        } else if (event.key === 'Enter' && current >= 0 && options[current]) {
+            event.preventDefault();
+            options[current].click();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            closeMatches(input);
+        }
+    });
+
+    document.addEventListener('pointerdown', function(event) {
+        if (event.target.closest && event.target.closest('.vhc-match-option')) {
+            event.preventDefault();
+            return;
+        }
+        document.querySelectorAll('.vhc-title-input[aria-expanded="true"]').forEach(function(input) {
+            var list = matchList(input);
+            if (event.target !== input && (!list || !list.contains(event.target))) {
+                closeMatches(input);
+            }
+        });
+    });
+
+    document.addEventListener('htmx:beforeRequest', function(event) {
+        if (event.detail.elt.classList.contains('vhc-title-input')) {
+            event.detail.elt.setAttribute('aria-busy', 'true');
+        }
+    });
+
+    document.addEventListener('htmx:afterRequest', function(event) {
+        if (event.detail.elt.classList.contains('vhc-title-input')) {
+            event.detail.elt.removeAttribute('aria-busy');
+        }
+    });
+
+    document.addEventListener('htmx:afterSwap', function(event) {
+        var list = event.detail.target;
+        if (!list.classList.contains('vhc-match-list')) return;
+        var input = document.getElementById(list.dataset.inputId);
+        if (!input || (document.activeElement !== input && !list.contains(document.activeElement))) {
+            closeMatches(input);
+            return;
+        }
+        var hasContent = Boolean(list.textContent.trim());
+        list.classList.toggle('hidden', !hasContent);
+        list.dataset.activeIndex = '-1';
+        input.setAttribute('aria-expanded', hasContent ? 'true' : 'false');
+        input.removeAttribute('aria-activedescendant');
+    });
 })();
 </script>
 """
