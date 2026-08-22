@@ -15,6 +15,7 @@ import webui
 from config import Config, load_config
 from probe import Skip, classify, has_qsv_device
 from store import Store
+import transcoder
 from transcoder import NotSupported, atomic_replace, transcode
 from validator import ValidationError, precheck_source, validate
 
@@ -237,7 +238,8 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             tmp_out.unlink(missing_ok=True)
             store.record(path, "failed", reason=f"source vanished: {e}",
                          orig_codec=info.codec,
-                         duration_seconds=time.time() - t_start)
+                         duration_seconds=time.time() - t_start,
+                         command=transcoder.last_ffmpeg_cmd)
             return
         if (current_stat.st_size != orig_size
                 or abs(current_stat.st_mtime - orig_mtime) > 1.0):
@@ -245,7 +247,8 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             tmp_out.unlink(missing_ok=True)
             store.record(path, "failed", reason="source modified during encode",
                          orig_codec=info.codec,
-                         duration_seconds=time.time() - t_start)
+                         duration_seconds=time.time() - t_start,
+                         command=transcoder.last_ffmpeg_cmd)
             return
 
         state.set_current(stage="replacing")
@@ -272,7 +275,8 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
         else:
             store.record(path, "failed", reason=f"validate: {e}",
                          orig_codec=info.codec,
-                         duration_seconds=time.time() - t_start)
+                         duration_seconds=time.time() - t_start,
+                         command=transcoder.last_ffmpeg_cmd)
     except NotSupported as e:
         log.info("SKIP  %s  (%s)", path, e)
         if tmp_out and tmp_out.exists():
@@ -291,7 +295,8 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             log.error("ENCODE-FAIL %s  (%s)", path, e)
             store.record(path, "failed", reason=f"encode: {e}",
                          orig_codec=info.codec,
-                         duration_seconds=time.time() - t_start)
+                         duration_seconds=time.time() - t_start,
+                         command=transcoder.last_ffmpeg_cmd)
     finally:
         state.clear_current()
 

@@ -29,6 +29,10 @@ import state
 
 log = logging.getLogger(__name__)
 
+# Populated by _run_ffmpeg() so failure paths downstream can log the exact
+# command that was executed.
+last_ffmpeg_cmd: list[str] | None = None
+
 
 class NotSupported(Exception):
     """Encoding pipeline is unavailable for this file — record as skipped."""
@@ -399,6 +403,8 @@ def transcode(info: VideoInfo, cfg: Config) -> Path:
 def _run_ffmpeg(cmd: list[str], cfg: Config) -> int:
     """Run ffmpeg with a `-progress` pipe watchdog. Returns exit code (-1 if killed)."""
     cmd = cmd + ["-progress", "pipe:1", "-nostats"]
+    global last_ffmpeg_cmd
+    last_ffmpeg_cmd = list(cmd)
     log.debug("cmd: %s", " ".join(cmd))
 
     proc = subprocess.Popen(

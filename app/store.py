@@ -124,6 +124,14 @@ class Store:
         dur = fields.get("duration_seconds")
         if dur is not None:
             lines.append(f"  elapsed: {dur:.1f}s")
+        cmd = fields.get("command")
+        if cmd:
+            # Quote args with spaces so the printed line pastes cleanly
+            # into a shell for the reproduction workflow.
+            lines.append(
+                "  command: "
+                + " ".join(f"'{a}'" if " " in str(a) else str(a) for a in cmd)
+            )
         entry = "\n".join(lines) + "\n\n"
         try:
             Path(self.failure_log_path).parent.mkdir(parents=True, exist_ok=True)
