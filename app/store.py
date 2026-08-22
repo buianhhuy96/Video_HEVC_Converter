@@ -28,6 +28,9 @@ CREATE INDEX IF NOT EXISTS idx_status ON processed(status);
 class Store:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # Human-readable failure log next to the state DB. Rolled every
+        # time via append; users can download it from the UI.
+        self.failure_log_path = str(Path(db_path).with_name("failures.log"))
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
@@ -105,3 +108,26 @@ class Store:
                     time.time(),
                 ),
             )
+        if status == "failed":
+            self._append_failure(path, fields)
+
+    def _append_failure(self, path: Path, fields: dict) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        lines = [f"{stamp}  {path}",
+                 f"  reason: {fields.get('reason') or '(none)'}"]
+        codec = fields.get("orig_codec")
+        if codec:
+            lines.append(f"  source codec: {codec}")
+        orig_size = fields.get("orig_size")
+        if orig_size:
+            lines.append(f"  source size: {orig_size} bytes")
+        dur = fields.get("duration_seconds")
+        if dur is not None:
+            lines.append(f"  elapsed: {dur:.1f}s")
+        entry = "\n".join(lines) + "\n\n"
+        try:
+            Path(self.failure_log_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.failure_log_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except OSError:
+            pass

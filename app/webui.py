@@ -24,7 +24,9 @@ from typing import Annotated
 
 import uvicorn
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+)
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import state
@@ -701,6 +703,10 @@ def _render_page(cfg: Config) -> str:
     <section id='tab-status' class='tab-content space-y-6 hidden'>
       <div class='flex items-center justify-between'>
         <h2 class='font-semibold text-lg'>Library status</h2>
+        <a class='btn btn-ghost' href='/api/state/failure_log' download='failures.log'
+           title='Human-readable log of every file the app has marked failed'>
+          Download failure log
+        </a>
       </div>
 
       <section class='card'>
@@ -2706,7 +2712,21 @@ def api_clear_cache(_: Auth) -> RedirectResponse:
     cfg = _load()
     with sqlite3.connect(cfg.runtime.state_db) as c:
         c.execute("DELETE FROM processed")
+    Path(cfg.runtime.state_db).with_name("failures.log").unlink(missing_ok=True)
     return RedirectResponse("/", status_code=303)
+
+
+@app.get("/api/state/failure_log", response_model=None)
+def api_failure_log(_: Auth) -> FileResponse | PlainTextResponse:
+    cfg = _load()
+    path = Path(cfg.runtime.state_db).with_name("failures.log")
+    if not path.exists() or path.stat().st_size == 0:
+        return PlainTextResponse(
+            "No failures logged yet.\n", media_type="text/plain"
+        )
+    return FileResponse(
+        str(path), media_type="text/plain", filename="failures.log",
+    )
 
 
 @app.post("/api/scan_paths/save")
