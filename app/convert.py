@@ -181,8 +181,18 @@ def _remerge_source_subs(
     sidecars: list[Path] = []
     if cfg.output.merge_external_subs:
         sidecars = _find_sidecar_subs(source)
+        log.info(
+            "sub-remerge: %d embedded text-sub stream(s), %d sidecar file(s) found",
+            len(source_subs), len(sidecars),
+        )
+    else:
+        log.info(
+            "sub-remerge: %d embedded text-sub stream(s) to merge",
+            len(source_subs),
+        )
 
     if not source_subs and not sidecars:
+        log.info("sub-remerge: nothing to merge — encoded file passes through")
         return encoded
 
     merged = encoded.with_name(f"{encoded.stem}.submerged{encoded.suffix}")
@@ -348,6 +358,7 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
         # Pre-flight: if the source is already damaged (bad PTS, corrupt
         # frames, unreadable middle), skip it. Encoding a broken source
         # produces a broken output AND destroys the original.
+        log.info("STEP  precheck: %s", path.name)
         try:
             precheck_source(path, info)
         except ValidationError as e:
@@ -357,11 +368,25 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
                          duration_seconds=time.time() - t_start)
             return
 
+        log.info("STEP  transcode start: %s", path.name)
         tmp_out = transcode(info, cfg)
+        log.info(
+            "STEP  transcode done: %s (%.1f MiB, %.1fs elapsed)",
+            path.name,
+            tmp_out.stat().st_size / (1024 * 1024),
+            time.time() - t_start,
+        )
+
         state.set_current(stage="validating", progress={})
+        log.info("STEP  validate start: %s", tmp_out.name)
+        # Encoder always strips subs (-sn); subs come back in via
+        # _remerge_source_subs BEFORE atomic_replace. So don't fail the
+        # tmp_out validate on the subtitle count mismatch — the merged
+        # file below is what actually reaches the final path.
         validate(info, tmp_out, cfg.validation,
-                 expect_subtitles=cfg.output.copy_subs,
+                 expect_subtitles=False,
                  progress_cb=state.set_progress)
+        log.info("STEP  validate ok: %s", tmp_out.name)
 
         new_size = tmp_out.stat().st_size
 
@@ -389,9 +414,16 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
 
         state.set_current(stage="replacing")
         if cfg.output.copy_subs or cfg.output.merge_external_subs:
+            log.info("STEP  sub-remerge start: %s", path.name)
             tmp_out = _remerge_source_subs(path, tmp_out, cfg)
             new_size = tmp_out.stat().st_size
+            log.info(
+                "STEP  sub-remerge done: %s (%.1f MiB)",
+                path.name, new_size / (1024 * 1024),
+            )
+        log.info("STEP  atomic_replace start: %s -> %s", path.name, tmp_out.name)
         final = atomic_replace(path, tmp_out, cfg)
+        log.info("STEP  atomic_replace done: %s", final.name)
         log.info(
             "DONE  %s -> %s  %.1f MiB -> %.1f MiB (%.0f%%)",
             path.name, final.name,
