@@ -48,6 +48,8 @@ class OutputCfg:
     fallback_container: str = ".mkv"
     copy_audio: bool = True
     copy_subs: bool = True
+    merge_external_subs: bool = False
+    delete_external_subs_after_merge: bool = False
 
 
 @dataclass

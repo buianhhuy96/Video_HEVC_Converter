@@ -131,19 +131,20 @@ def _needs_bt709_bsf(info: VideoInfo) -> bool:
 
 
 def _stream_map_args(cfg: Config, info: VideoInfo) -> list[str]:
-    """Map main video for encoding + cover art / audio / subs / attachments to copy.
+    """Map main video for encoding + cover art / audio / attachments to copy.
 
-    `0:V?` selects real video streams (excluding attached_pic) — those get
-    encoded. Cover art is mapped separately so it can be bit-copied via a
-    per-stream codec override (see `_common_output_args`).
+    Subtitles are deliberately NOT mapped here — matroska + sparse subrip
+    streams stalls the muxer and produces a stub video output that decodes
+    to ~1s. `_extract_sidecar_subs` writes them alongside instead.
+    `0:V?` selects real video streams (excluding attached_pic); cover art
+    is mapped separately so it can be bit-copied via a per-stream codec
+    override (see `_common_output_args`).
     """
     args = ["-map", "0:V?"]
     if info.attached_pic_streams > 0:
         args += ["-map", "0:v:m:attached_pic?"]
     if cfg.output.copy_audio:
         args += ["-map", "0:a?"]
-    if cfg.output.copy_subs:
-        args += ["-map", "0:s?"]
     args += ["-map", "0:t?"]
     return args
 
@@ -157,11 +158,8 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
         args += ["-c:v:1", "copy"]
     if cfg.output.copy_audio:
         args += ["-c:a", "copy"]
-    if cfg.output.copy_subs:
-        # Strict bit-for-bit passthrough of subtitle streams.
-        args += ["-c:s", "copy"]
-    else:
-        args += ["-sn"]
+    # Subtitles never travel in-container — see `_stream_map_args`.
+    args += ["-sn"]
     if cfg.encoder.preserve_color_metadata:
         if info.color_primaries:
             args += ["-color_primaries", info.color_primaries]
@@ -194,6 +192,10 @@ def _common_output_args(out_ext: str, cfg: Config, info: VideoInfo) -> list[str]
     ]
     if out_ext in FASTSTART_CONTAINERS:
         args += ["-movflags", "+faststart"]
+        # QuickTime / iOS / Safari / tvOS require the 'hvc1' fourcc for HEVC;
+        # ffmpeg's mp4 muxer defaults to 'hev1' which those players silently
+        # reject.
+        args += ["-tag:v", "hvc1"]
     return args
 
 
@@ -231,15 +233,27 @@ def _build_qsv_cmd(
         "-c:v", "hevc_qsv",
         "-preset", enc.preset,
         "-global_quality", str(enc.global_quality),
-        # ICQ tuning knobs — scene-cut aware I-frames, smarter B-frame
-        # placement, pyramid B-frames, more references per GOP. Small quality
-        # bump (~5%) at negligible speed cost on Xe-LP.
-        "-adaptive_i", "1",
-        "-adaptive_b", "1",
-        "-b_strategy", "1",
-        "-bf", "4",
-        "-refs", "4",
     ]
+
+    # ICQ tuning knobs — scene-cut aware I-frames, smarter B-frame
+    # placement, pyramid B-frames, more references per GOP. Small quality
+    # bump (~5%) at negligible speed cost on Xe-LP. Gated on 16-aligned
+    # dimensions: iHD's B-pyramid + refs combo corrupts the encoded
+    # bitstream on non-macroblock-aligned frames (encoder finishes at
+    # 300x, container reports full duration, decoder gets ~1s of video).
+    if info.width % 16 == 0 and info.height % 16 == 0:
+        cmd += [
+            "-adaptive_i", "1",
+            "-adaptive_b", "1",
+            "-b_strategy", "1",
+            "-bf", "4",
+            "-refs", "4",
+        ]
+    else:
+        log.info(
+            "skipping aggressive B-pyramid tuning: %dx%d is not 16-aligned",
+            info.width, info.height,
+        )
 
     if enc.look_ahead and enc.look_ahead_depth > 0:
         cmd += ["-look_ahead", "1", "-look_ahead_depth", str(enc.look_ahead_depth)]

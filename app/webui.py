@@ -562,6 +562,22 @@ def _render_page(cfg: Config) -> str:
                      {"checked" if r.delete_original else ""}>
               Overwrite original after successful validation
             </label>
+            <div class='pt-2 border-t border-slate-700'>
+              <label class='flex items-center gap-2 text-sm'>
+                <input type='checkbox' name='merge_external_subs'
+                       {"checked" if o.merge_external_subs else ""}
+                       onchange="document.getElementById('vhc-del-subs').disabled = !this.checked">
+                Merge external subtitle files (<code>Movie.en.srt</code>, <code>Movie.forced.srt</code>, \u2026)
+                into the encoded video
+              </label>
+              <label class='flex items-center gap-2 text-sm ml-6 mt-1'>
+                <input type='checkbox' id='vhc-del-subs'
+                       name='delete_external_subs_after_merge'
+                       {"checked" if o.delete_external_subs_after_merge else ""}
+                       {"" if o.merge_external_subs else "disabled"}>
+                <span class='text-slate-400'>and delete the sidecar files after a successful merge</span>
+              </label>
+            </div>
             <label class='flex items-center gap-2 text-sm'>
               <input type='checkbox' name='deband' {"checked" if e.deband else ""}>
               Deband (soften 8-bit banding &mdash; NVENC path only; skipped in QSV full-HW)
@@ -2653,6 +2669,8 @@ def api_settings(
     fixed_frame_rate: Annotated[str | None, Form()] = None,
     sweep_at_time: Annotated[str, Form()] = "",
     delete_original: Annotated[str | None, Form()] = None,
+    merge_external_subs: Annotated[str | None, Form()] = None,
+    delete_external_subs_after_merge: Annotated[str | None, Form()] = None,
     dry_run: Annotated[str | None, Form()] = None,
     tmdb_api_token: Annotated[str, Form()] = "",
     tmdb_language: Annotated[str, Form()] = "",
@@ -2689,6 +2707,11 @@ def api_settings(
     cfg.runtime.sweep_at_time = sweep_at_time
     cfg.runtime.delete_original = bool(delete_original)
     cfg.runtime.dry_run = bool(dry_run)
+    cfg.output.merge_external_subs = bool(merge_external_subs)
+    cfg.output.delete_external_subs_after_merge = (
+        bool(delete_external_subs_after_merge)
+        and cfg.output.merge_external_subs
+    )
     if tmdb_api_token.strip():
         cfg.metadata.tmdb_api_token = tmdb_api_token.strip()
     tmdb_language = tmdb_language.strip()

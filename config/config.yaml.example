@@ -133,8 +133,21 @@ output:
   fallback_container: .mkv
 
   # Copy all audio, subtitle, and attachment streams unchanged.
+  # Subtitles from the source are muxed in after the encode via a separate
+  # ffmpeg pass (in-container muxing during encoding stalls on sparse
+  # subrip streams).
   copy_audio: true
   copy_subs: true
+
+  # Also pick up sidecar subtitle files (Movie.en.srt, Movie.forced.srt, …)
+  # next to the source and mux them into the encoded output alongside any
+  # embedded subs. Language is guessed from the filename's first tail token.
+  merge_external_subs: false
+
+  # When merge_external_subs is on and the merge succeeds, delete the
+  # sidecar .srt/.ass/.vtt files that were pulled in. Ignored when
+  # merge_external_subs is off.
+  delete_external_subs_after_merge: false
 
 # ---------------------------------------------------------------------------
 # Validation — how thoroughly to verify the transcoded file before replacing

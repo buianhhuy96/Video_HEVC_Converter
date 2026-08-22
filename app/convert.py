@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -101,6 +102,141 @@ def _seconds_until(hhmm: str) -> float | None:
     if target <= now:
         target += timedelta(days=1)
     return (target - now).total_seconds()
+
+
+_TEXT_SUB_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text",
+                    "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}
+_SIDECAR_SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup"}
+
+
+def _find_sidecar_subs(video: Path) -> list[Path]:
+    """Sibling files with the video's stem and any subtitle extension.
+    Matches names like `Movie.en.srt`, `Movie.forced.en.srt`, etc.
+    Returns [] if the parent directory is unreadable or has no matches.
+    """
+    if not video.parent.exists():
+        return []
+    stem_lower = video.stem.lower() + "."
+    subs: list[Path] = []
+    try:
+        for sibling in video.parent.iterdir():
+            if not sibling.is_file():
+                continue
+            if sibling.suffix.lower() not in _SIDECAR_SUB_EXTS:
+                continue
+            if sibling.name.lower().startswith(stem_lower):
+                subs.append(sibling)
+    except OSError:
+        return []
+    return sorted(subs)
+
+
+def _sidecar_language(sidecar: Path, video_stem: str) -> str | None:
+    """Guess an ISO language tag from the tail of a sidecar name.
+    `Movie.eng.forced.srt` with video stem `Movie` returns `eng`. When the
+    first tail token isn't 2- or 3-letter alphabetic, returns None so we
+    let the muxer default the language field."""
+    lead = video_stem.lower() + "."
+    tail = sidecar.name[len(lead):] if sidecar.name.lower().startswith(lead) else ""
+    if not tail:
+        return None
+    first = tail.split(".", 1)[0]
+    if 2 <= len(first) <= 3 and first.isalpha():
+        return first.lower()
+    return None
+
+
+def _remerge_source_subs(
+    source: Path, encoded: Path, cfg: Config,
+) -> Path:
+    """If `source` has embedded subtitle streams or has sidecar sub files
+    next to it (only when cfg.output.merge_external_subs), merge them
+    into `encoded` via a stream-copy remux and return the merged path.
+    On no subs or failure, return `encoded` unchanged.
+
+    Doing the subtitle mux as a second pass avoids the matroska-muxer
+    stall that occurs when subtitle streams are interleaved with a live
+    HEVC encode + look-ahead.
+    """
+    source_subs: list[str] = []
+    if cfg.output.copy_subs:
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-select_streams", "s",
+                    "-show_entries", "stream=index,codec_name",
+                    "-of", "csv=p=0", str(source),
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("sub-remerge: ffprobe failed on %s (%s)", source, e)
+            return encoded
+        if probe.returncode == 0:
+            source_subs = [
+                line.strip() for line in probe.stdout.splitlines()
+                if line.strip() and line.split(",")[-1].lower() in _TEXT_SUB_CODECS
+            ]
+
+    sidecars: list[Path] = []
+    if cfg.output.merge_external_subs:
+        sidecars = _find_sidecar_subs(source)
+
+    if not source_subs and not sidecars:
+        return encoded
+
+    merged = encoded.with_name(f"{encoded.stem}.submerged{encoded.suffix}")
+    if merged.exists():
+        merged.unlink()
+
+    cmd = ["ffmpeg", "-hide_banner", "-y", "-loglevel", "warning",
+           "-nostdin",
+           "-i", str(encoded), "-i", str(source)]
+    for sidecar in sidecars:
+        cmd += ["-i", str(sidecar)]
+    cmd += ["-map", "0"]
+    if cfg.output.copy_subs:
+        cmd += ["-map", "1:s?"]
+    for i, sidecar in enumerate(sidecars, start=2):
+        cmd += ["-map", f"{i}:s?"]
+    cmd += ["-c", "copy", "-max_interleave_delta", "0"]
+    for i, sidecar in enumerate(sidecars):
+        lang = _sidecar_language(sidecar, source.stem)
+        if lang:
+            # First sidecar's subtitle stream lands after all source-mapped
+            # subs — number them sequentially past that. We can't index by
+            # source count without probing more, so tag against the sidecar's
+            # own stream ordinal using the ':m:filename' shortcut.
+            cmd += [f"-metadata:s:s:{len(source_subs) + i}", f"language={lang}"]
+    cmd += [str(merged)]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("sub-remerge: ffmpeg failed (%s)", e)
+        merged.unlink(missing_ok=True)
+        return encoded
+    if proc.returncode != 0 or not merged.exists() or merged.stat().st_size == 0:
+        log.warning(
+            "sub-remerge: rc=%d %s", proc.returncode,
+            proc.stderr.strip()[:200],
+        )
+        merged.unlink(missing_ok=True)
+        return encoded
+    encoded.unlink()
+    log.info(
+        "sub-remerge: %d embedded + %d sidecar(s) merged into %s",
+        len(source_subs), len(sidecars), encoded.name,
+    )
+    if sidecars and cfg.output.delete_external_subs_after_merge:
+        for sidecar in sidecars:
+            try:
+                sidecar.unlink()
+                log.info("sub-remerge: removed sidecar %s", sidecar.name)
+            except OSError as e:
+                log.warning("sub-remerge: could not delete sidecar %s (%s)",
+                            sidecar, e)
+    return merged
 
 
 def _classify(path: Path, cfg: Config, store: Store):
@@ -252,6 +388,9 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             return
 
         state.set_current(stage="replacing")
+        if cfg.output.copy_subs or cfg.output.merge_external_subs:
+            tmp_out = _remerge_source_subs(path, tmp_out, cfg)
+            new_size = tmp_out.stat().st_size
         final = atomic_replace(path, tmp_out, cfg)
         log.info(
             "DONE  %s -> %s  %.1f MiB -> %.1f MiB (%.0f%%)",

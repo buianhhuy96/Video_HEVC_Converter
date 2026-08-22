@@ -35,6 +35,8 @@ class VideoInfo:
     color_trc: str
     color_space: str
     color_range: str
+    field_order: str = "progressive"  # ffprobe: progressive|tt|bb|tb|bt
+    has_dolby_vision: bool = False
 
 
 class Skip(Exception):
@@ -106,6 +108,20 @@ def probe_video(path: Path) -> VideoInfo:
     color_space = _clean("color_space")
     color_range = _clean("color_range")
 
+    field_order = (v.get("field_order") or "progressive").lower()
+    if field_order in ("", "unknown"):
+        field_order = "progressive"
+
+    # Dolby Vision reveals itself via a DOVI configuration record in the
+    # stream's side_data_list. If present, HEVC re-encoding drops the RPU
+    # and turns the file into plain HDR10 (or worse if the encoder mis-
+    # handles the enhancement layer).
+    has_dolby_vision = any(
+        (sd.get("side_data_type") or "").lower().startswith("dovi ")
+        or "dolby vision" in (sd.get("side_data_type") or "").lower()
+        for sd in (v.get("side_data_list") or [])
+    )
+
     duration = 0.0
     fmt = data.get("format", {})
     if fmt.get("duration"):
@@ -136,6 +152,8 @@ def probe_video(path: Path) -> VideoInfo:
         color_trc=color_trc,
         color_space=color_space,
         color_range=color_range,
+        field_order=field_order,
+        has_dolby_vision=has_dolby_vision,
     )
 
 
@@ -173,6 +191,25 @@ def classify(path: Path, cfg: Config) -> VideoInfo:
 
     if info.bit_depth > 10:
         raise Skip(f"{info.bit_depth}-bit source — skipped (no lossless HEVC path here)")
+
+    if info.has_dolby_vision:
+        raise Skip(
+            "Dolby Vision source — re-encoding would strip the DV enhancement "
+            "layer; skipped to preserve the DV metadata"
+        )
+
+    if info.color_trc in ("smpte2084", "arib-std-b67"):
+        raise Skip(
+            f"HDR transfer '{info.color_trc}' — re-encoding would need "
+            "MDCV/CLL side-data forwarding we don't implement; skipped to "
+            "preserve HDR fidelity"
+        )
+
+    if info.field_order not in ("progressive", ""):
+        raise Skip(
+            f"interlaced source (field_order={info.field_order}) — no "
+            "guaranteed-safe deinterlace path; skipped"
+        )
 
     return info
 
