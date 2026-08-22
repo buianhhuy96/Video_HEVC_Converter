@@ -377,12 +377,22 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             time.time() - t_start,
         )
 
+        # Sub-remerge BEFORE validate so validate inspects the final file
+        # that will replace the source — full stream layout, real byte
+        # content, catches remerge regressions too.
+        if cfg.output.copy_subs or cfg.output.merge_external_subs:
+            log.info("STEP  sub-remerge start: %s", path.name)
+            tmp_out = _remerge_source_subs(path, tmp_out, cfg)
+            log.info(
+                "STEP  sub-remerge done: %s (%.1f MiB)",
+                path.name, tmp_out.stat().st_size / (1024 * 1024),
+            )
+
         state.set_current(stage="validating", progress={})
         log.info("STEP  validate start: %s", tmp_out.name)
-        # Encoder always strips subs (-sn); subs come back in via
-        # _remerge_source_subs BEFORE atomic_replace. So don't fail the
-        # tmp_out validate on the subtitle count mismatch — the merged
-        # file below is what actually reaches the final path.
+        # Subtitle count check is disabled: bitmap subs (PGS/DVBSUB) and
+        # any non-text streams get dropped by the text-only remerge, so a
+        # strict match against the source count would fail on legit files.
         validate(info, tmp_out, cfg.validation,
                  expect_subtitles=False,
                  progress_cb=state.set_progress)
@@ -413,14 +423,6 @@ def _encode_and_replace(path: Path, info, cfg: Config, store: Store) -> None:
             return
 
         state.set_current(stage="replacing")
-        if cfg.output.copy_subs or cfg.output.merge_external_subs:
-            log.info("STEP  sub-remerge start: %s", path.name)
-            tmp_out = _remerge_source_subs(path, tmp_out, cfg)
-            new_size = tmp_out.stat().st_size
-            log.info(
-                "STEP  sub-remerge done: %s (%.1f MiB)",
-                path.name, new_size / (1024 * 1024),
-            )
         log.info("STEP  atomic_replace start: %s -> %s", path.name, tmp_out.name)
         final = atomic_replace(path, tmp_out, cfg)
         log.info("STEP  atomic_replace done: %s", final.name)
