@@ -1150,8 +1150,20 @@ def _render_progress() -> str:
 
         started = cur.get("started_at") or 0
         elapsed = time.time() - started if started else 0
+        # ETA from ffmpeg's own speed=Nx multiplier — accurate across
+        # encoding and validation stages. Falls back to elapsed-vs-pct
+        # extrapolation when speed isn't parseable yet.
         eta_str = "—"
-        if pct >= 1.0 and elapsed > 0:
+        raw_speed = (p.get("speed") or "").strip().rstrip("x")
+        speed_ratio = 0.0
+        try:
+            speed_ratio = float(raw_speed)
+        except ValueError:
+            pass
+        if speed_ratio > 0 and duration > 0 and out_time_s is not None:
+            remaining = max(0.0, (duration - out_time_s) / speed_ratio)
+            eta_str = _fmt_elapsed(remaining)
+        elif pct >= 1.0 and elapsed > 0:
             eta_str = _fmt_elapsed(elapsed * (100 - pct) / pct)
 
         stage_upper = cur["stage"].upper()
@@ -1174,6 +1186,9 @@ def _render_progress() -> str:
                 "Copying to the source location and swapping in atomically."
                 "</p>"
             )
+
+        raw_bitrate = p.get("bitrate")
+        bitrate_disp = raw_bitrate if raw_bitrate not in (None, "", "N/A") else "\u2014"
 
         current_block = f"""
         <div class='space-y-4'>
@@ -1200,11 +1215,17 @@ def _render_progress() -> str:
             </div>
           </div>
 
-          <div class='grid grid-cols-3 gap-3 text-sm text-slate-300'>
+          <div class='grid grid-cols-4 gap-3 text-sm text-slate-300'>
             <div class='bg-slate-900 rounded p-3'>
               <div class='text-xs text-slate-400'>Speed</div>
               <div class='text-lg font-semibold text-slate-100'>
                 {_esc(p.get("speed", "—"))}
+              </div>
+            </div>
+            <div class='bg-slate-900 rounded p-3'>
+              <div class='text-xs text-slate-400'>Bitrate</div>
+              <div class='text-lg font-semibold text-slate-100'>
+                {_esc(bitrate_disp)}
               </div>
             </div>
             <div class='bg-slate-900 rounded p-3'>

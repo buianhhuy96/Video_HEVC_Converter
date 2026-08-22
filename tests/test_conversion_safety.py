@@ -47,9 +47,11 @@ class ProgressRenderingTests(unittest.TestCase):
         state.set_pending([])
 
     def test_validation_progress_shows_reliable_metrics_only(self) -> None:
-        """Bitrate/total_size are unreliable under -max_interleave_delta 0;
-        the progress card must show reliable metrics (frame count, source
-        size) instead, and _fmt_bytes must survive N/A input safely."""
+        """During validation ffmpeg's null output makes bitrate/total_size
+        arrive as 'N/A'. The Bitrate tile is still present (encoding shows
+        a real value there) but must degrade to an em-dash rather than
+        the raw 'N/A' string. Frames encoded and Source size must always
+        appear. _fmt_bytes must survive N/A input safely."""
         state.set_current(
             path="episode.mkv",
             stage="validating",
@@ -70,7 +72,8 @@ class ProgressRenderingTests(unittest.TestCase):
         self.assertIn("Frames encoded", markup)
         self.assertIn("17280", markup)
         self.assertIn("Source size", markup)
-        self.assertNotIn("Bitrate", markup)
+        self.assertIn("Bitrate", markup)
+        self.assertNotIn("N/A", markup)
         self.assertNotIn("Output size so far", markup)
         self.assertEqual(webui._fmt_bytes("N/A"), "\u2014")
         self.assertEqual(webui._fmt_bytes("1024"), "1.0 KiB")
